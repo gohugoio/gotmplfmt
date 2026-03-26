@@ -55,7 +55,7 @@ func newPrinter() *printer {
 
 func (p *printer) WritePrefix() {
 	p.WriteString(p.prefix)
-	p.WriteString(strings.Repeat("  ", p.depth))
+	p.WriteString(strings.Repeat("\t", p.depth))
 }
 
 func (p *printer) writeBranchIndent() {
@@ -64,7 +64,7 @@ func (p *printer) writeBranchIndent() {
 	}
 	s := p.String()
 	if len(s) == 0 || s[len(s)-1] == '\n' {
-		p.WriteString(strings.Repeat("  ", p.branchBase+p.branchDepth))
+		p.WriteString(strings.Repeat("\t", p.branchBase+p.branchDepth))
 	}
 }
 
@@ -234,7 +234,7 @@ func (t *TextNode) writeTo(sb *printer) {
 			sb.WriteByte('\n')
 			trimmed := strings.TrimLeft(line, " \t")
 			if trimmed != "" {
-				sb.WriteString(strings.Repeat("  ", sb.branchBase+sb.branchDepth))
+				sb.WriteString(strings.Repeat("\t", sb.branchBase+sb.branchDepth))
 				sb.WriteString(trimmed)
 			}
 		} else {
@@ -948,7 +948,7 @@ func (b *BranchNode) writeTo(sb *printer) {
 	prevBase := sb.branchBase
 	if sb.branchDepth == 0 {
 		if ws, ok := whitespacePrefix(b, "{{"); ok && len(ws) > 0 {
-			sb.branchBase = (len(ws) + 1) / 2 // round up to indent levels
+			sb.branchBase = strings.Count(ws, "\t") // count tab indent levels
 		}
 	}
 	sb.writeBranchIndent()

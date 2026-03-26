@@ -2,6 +2,7 @@
 
 * I have used [prettier-plugin-go-template](https://github.com/NiklasPor/prettier-plugin-go-template) for many years, to the formatting here is greatly influenced by that output.
 * Some notable differences:
+  * We use ... tabs and not spaces for indentation.
   * We don't auto-add trailing newlines; see [this issue](https://github.com/prettier/prettier/issues/13036) for some context.
   * We don't read `.prettierignore`.
   * But we do support `{{/* gotmplfmt-ignore-all */}}` (must be at the top of file), `{{/* gotmplfmt-ignore-start */}}` and `{{/* gotmplfmt-ignore-end */}}`
