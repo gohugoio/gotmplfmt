@@ -9,7 +9,5 @@ func Format(text string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// TODO: probably want to move all the printing logic out of the nodes
-	// and into something more flexible here.
 	return root.String(), nil
 }

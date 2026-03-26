@@ -158,7 +158,27 @@ func (l *ListNode) writeTo(sb *printer) {
 	if l == nil {
 		return
 	}
-	for _, n := range l.Nodes {
+	for i := 0; i < len(l.Nodes); i++ {
+		n := l.Nodes[i]
+		if c, ok := n.(*CommentNode); ok && strings.Contains(c.Text, "gotmplfmt-ignore-start") {
+			// Find the matching ignore-end comment in this list.
+			found := false
+			for j := i + 1; j < len(l.Nodes); j++ {
+				if c2, ok := l.Nodes[j].(*CommentNode); ok && strings.Contains(c2.Text, "gotmplfmt-ignore-end") {
+					src := l.tr.text
+					regionStart := strings.LastIndex(src[:int(c.Position())], "{{")
+					afterEnd := int(c2.Position()) + len(c2.Text)
+					regionEnd := afterEnd + strings.Index(src[afterEnd:], "}}") + 2
+					sb.WriteString(src[regionStart:regionEnd])
+					i = j
+					found = true
+					break
+				}
+			}
+			if found {
+				continue
+			}
+		}
 		n.writeTo(sb)
 	}
 }
