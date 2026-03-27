@@ -1,0 +1,60 @@
+{
+  "name": "gotmplfmt",
+  "displayName": "gotmplfmt",
+  "description": "Format Go templates using gotmplfmt",
+  "version": "0.1.0",
+  "publisher": "gohugoio",
+  "license": "BSD-3-Clause",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gohugoio/gotmplfmt"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Formatters"
+  ],
+  "activationEvents": [
+    "onLanguage:html",
+    "onLanguage:gohtml",
+    "onLanguage:go-template"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "gotmplfmt",
+      "properties": {
+        "gotmplfmt.path": {
+          "type": "string",
+          "default": "gotmplfmt",
+          "description": "Path to the gotmplfmt binary."
+        },
+        "gotmplfmt.languages": {
+          "type": "array",
+          "default": [
+            "html",
+            "gohtml",
+            "go-template"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Language IDs for which gotmplfmt provides formatting."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.0.0"
+  }
+}
