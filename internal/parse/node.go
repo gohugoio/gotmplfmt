@@ -313,10 +313,24 @@ func (t *TextNode) writeTo(sb *printer) {
 	lines := strings.Split(t.Text, "\n")
 	for i, line := range lines {
 		if i > 0 {
-			trimmed := strings.Trim(line, " \t")
+			trimmed := strings.TrimLeft(line, " \t")
 			if trimmed == "" {
 				sb.WriteByte('\n')
 				continue
+			}
+			// Strip trailing whitespace from the last line of the TextNode,
+			// which sits between content and the next template action.
+			// Preserve a trailing space after '{' to avoid creating '{{{'.
+			if i == len(lines)-1 {
+				t := strings.TrimRight(trimmed, " \t")
+				if t == "" {
+					continue
+				}
+				if t[len(t)-1] == '{' {
+					trimmed = t + " "
+				} else {
+					trimmed = t
+				}
 			}
 			// Split the line at tag boundaries where depth drops,
 			// so closing tags that end a nesting level get their own line.
@@ -338,6 +352,8 @@ func (t *TextNode) writeTo(sb *printer) {
 		}
 	}
 }
+
+
 
 // splitHTMLLine splits a line into segments where a closing tag would decrease
 // depth below the line's starting depth. For example, "<div></div></div>" becomes
