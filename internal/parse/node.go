@@ -14,6 +14,29 @@ import (
 
 var textFormat = "%s" // Changed to "%q" in tests for better error messages.
 
+// Directive comment markers.
+const (
+	directiveIgnoreAll   = "gotmplfmt-ignore-all"
+	directiveIgnoreStart = "gotmplfmt-ignore-start"
+	directiveIgnoreEnd   = "gotmplfmt-ignore-end"
+)
+
+// Pre-computed indent strings to avoid repeated allocation.
+var indentTab [16]string
+
+func init() {
+	for i := range indentTab {
+		indentTab[i] = strings.Repeat("\t", i)
+	}
+}
+
+func indent(level int) string {
+	if level < len(indentTab) {
+		return indentTab[level]
+	}
+	return strings.Repeat("\t", level)
+}
+
 // A Node is an element in the parse tree. The interface is trivial.
 // The interface contains an unexported method so that only
 // types local to this package can satisfy it.
@@ -55,7 +78,7 @@ func newPrinter() *printer {
 
 func (p *printer) WritePrefix() {
 	p.WriteString(p.prefix)
-	p.WriteString(strings.Repeat("\t", p.depth))
+	p.WriteString(indent(p.depth))
 }
 
 func (p *printer) writeBranchIndent() {
@@ -64,7 +87,7 @@ func (p *printer) writeBranchIndent() {
 	}
 	s := p.String()
 	if len(s) == 0 || s[len(s)-1] == '\n' {
-		p.WriteString(strings.Repeat("\t", p.branchBase+p.branchDepth))
+		p.WriteString(indent(p.branchBase + p.branchDepth))
 	}
 }
 
@@ -144,10 +167,10 @@ func (t *Tree) newList(pos Pos) *ListNode {
 func (l *ListNode) HasIgnoreAll() bool {
 	for _, n := range l.Nodes {
 		if c, ok := n.(*CommentNode); ok {
-			return strings.Contains(c.Text, "gotmplfmt-ignore-all")
+			return strings.Contains(c.Text, directiveIgnoreAll)
 		}
 		if _, ok := n.(*TextNode); ok {
-			continue // skip leading text (whitespace/newlines)
+			continue
 		}
 		break
 	}
@@ -174,11 +197,10 @@ func (l *ListNode) writeTo(sb *printer) {
 	}
 	for i := 0; i < len(l.Nodes); i++ {
 		n := l.Nodes[i]
-		if c, ok := n.(*CommentNode); ok && strings.Contains(c.Text, "gotmplfmt-ignore-start") {
-			// Find the matching ignore-end comment in this list.
+		if c, ok := n.(*CommentNode); ok && strings.Contains(c.Text, directiveIgnoreStart) {
 			found := false
 			for j := i + 1; j < len(l.Nodes); j++ {
-				if c2, ok := l.Nodes[j].(*CommentNode); ok && strings.Contains(c2.Text, "gotmplfmt-ignore-end") {
+				if c2, ok := l.Nodes[j].(*CommentNode); ok && strings.Contains(c2.Text, directiveIgnoreEnd) {
 					src := l.tr.text
 					regionStart := strings.LastIndex(src[:int(c.Position())], "{{")
 					afterEnd := int(c2.Position()) + len(c2.Text)
@@ -234,7 +256,7 @@ func (t *TextNode) writeTo(sb *printer) {
 			sb.WriteByte('\n')
 			trimmed := strings.TrimLeft(line, " \t")
 			if trimmed != "" {
-				sb.WriteString(strings.Repeat("\t", sb.branchBase+sb.branchDepth))
+				sb.WriteString(indent(sb.branchBase + sb.branchDepth))
 				sb.WriteString(trimmed)
 			}
 		} else {
