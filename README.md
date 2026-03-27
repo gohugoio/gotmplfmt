@@ -7,7 +7,7 @@ The formatting is greatly inspired by [prettier-plugin-go-template](https://gith
   * We use ... tabs and not spaces for indentation.
   * We don't auto-add trailing newlines to the document; see [this issue](https://github.com/prettier/prettier/issues/13036) for some context.
   * We don't read `.prettierignore`.
-  * But we do support `{{/* gotmplfmt-ignore-all */}}` (must be at the top of file), `{{/* gotmplfmt-ignore-start */}}` and `{{/* gotmplfmt-ignore-end */}}`
+  * But we do support `{{/* gotmplfmt-ignore-all */}}`, `{{/* gotmplfmt-ignore-start */}}` and `{{/* gotmplfmt-ignore-end */}}`.
   * And we do care about idempotency, so if you run into a example where we format differently on subsequent runs, please report it as a bug.
 
 ## License

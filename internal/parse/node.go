@@ -194,7 +194,6 @@ func lineno(n Node) int {
 	return strings.Count(n.tree().text[:n.Position()], "\n")
 }
 
-
 // Type returns itself and provides an easy default implementation
 // for embedding in a Node. Embedded in all non-trivial Nodes.
 func (t NodeType) Type() NodeType {
@@ -352,8 +351,6 @@ func (t *TextNode) writeTo(sb *printer) {
 		}
 	}
 }
-
-
 
 // splitHTMLLine splits a line into segments where a closing tag would decrease
 // depth below the line's starting depth. For example, "<div></div></div>" becomes
