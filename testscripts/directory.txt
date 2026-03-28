@@ -1,0 +1,34 @@
+# Test directory walking: formats template files, skips non-template files.
+
+gotmplfmt -w mysite
+cmp mysite/index.html expected.html
+cmp mysite/partial.htm expected.html
+cmp mysite/feed.xml expected.xml
+cmp mysite/style.css original.css
+
+-- mysite/index.html --
+<div>
+  <span>hello</span>
+</div>
+-- mysite/partial.htm --
+<div>
+  <span>hello</span>
+</div>
+-- mysite/feed.xml --
+<rss>
+  <channel>
+  </channel>
+</rss>
+-- mysite/style.css --
+body { color: red; }
+-- expected.html --
+<div>
+	<span>hello</span>
+</div>
+-- expected.xml --
+<rss>
+	<channel>
+	</channel>
+</rss>
+-- original.css --
+body { color: red; }

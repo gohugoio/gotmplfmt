@@ -1,0 +1,20 @@
+# Test formatting a single file to stdout.
+
+gotmplfmt input.html
+cmp stdout expected.html
+
+# Source file should be unchanged.
+cmp input.html original.html
+
+-- input.html --
+<div>
+  <span>hello</span>
+</div>
+-- original.html --
+<div>
+  <span>hello</span>
+</div>
+-- expected.html --
+<div>
+	<span>hello</span>
+</div>

@@ -1,0 +1,16 @@
+# Test -w flag writes back to source file.
+
+gotmplfmt -w input.html
+cmp input.html expected.html
+
+# Stdout should be empty when using -w.
+! stdout .
+
+-- input.html --
+<div>
+  <span>hello</span>
+</div>
+-- expected.html --
+<div>
+	<span>hello</span>
+</div>

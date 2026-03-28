@@ -1,0 +1,4 @@
+# Test error on non-existent path.
+
+! gotmplfmt nonexistent.html
+stderr 'nonexistent.html'

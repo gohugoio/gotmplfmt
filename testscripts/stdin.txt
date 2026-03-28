@@ -1,0 +1,14 @@
+# Test reading from stdin when no args are given.
+
+stdin input.html
+gotmplfmt
+cmp stdout expected.html
+
+-- input.html --
+<div>
+  <span>hello</span>
+</div>
+-- expected.html --
+<div>
+	<span>hello</span>
+</div>
