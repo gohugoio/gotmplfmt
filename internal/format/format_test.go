@@ -113,6 +113,9 @@ func tryParseGoTextTemplate(t *testing.T, text string) {
 		"resources":   fn,
 		"site":        fn,
 		"fingerprint": fn,
+		"safeCSS":     fn,
+		"append":      fn,
+		"errorf":      fn,
 	}
 
 	_, err := template.New("").Funcs(funcMap).Parse(text)

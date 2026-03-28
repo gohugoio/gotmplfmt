@@ -4,6 +4,10 @@ stdin input.html
 gotmplfmt
 cmp stdout expected.html
 
+# Test that -w with stdin fails.
+! gotmplfmt -w
+stderr 'error: cannot use -w with standard input'
+
 -- input.html --
 <div>
   <span>hello</span>

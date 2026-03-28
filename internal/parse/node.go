@@ -73,6 +73,17 @@ type printer struct {
 	inHTMLTag      bool // inside a '<' that hasn't been closed with '>'
 	htmlTagIsClose bool // the current incomplete tag is a closing tag
 	htmlTagIsVoid  bool // the current incomplete tag is a void element
+
+	inOneLiner         bool // inside a one-liner branch (suppress newlines for else/end)
+	oneLinerHTMLIndent bool // one-liner was indented as attribute in multi-line HTML tag
+	rightTrimPending   bool // right trim: strip leading whitespace from the next text node
+
+	// Multi-line HTML tag tracking.
+	htmlTagName       string // tag name of the current open tag
+	htmlQuoteChar     byte   // 0 if not in attr value, '"' or '\'' otherwise
+	inHTMLAttrValue   bool   // inside a quoted attribute value within a tag
+	htmlTagHadActions bool   // a template action was written while this tag was open
+	pendingCloseTag   string // tag name to auto-close after '>'
 }
 
 func newPrinter() *printer {
@@ -108,10 +119,28 @@ func (p *printer) writeBranchIndent() {
 // writeControlIndent is like writeBranchIndent but forces a newline if the
 // output doesn't already end with one. Used for template control structures
 // (end, else, if, range, etc.) which must always start on their own line.
-// When inside an HTML tag (attribute value context), newlines and indentation
-// are suppressed to keep the attribute on a single line.
+// When inside an HTML tag's quoted attribute value, newlines and indentation
+// are suppressed to keep the attribute on a single line. When inside a
+// multi-line HTML tag but outside quotes, template actions are indented
+// one level deeper than the tag itself (like attribute continuation lines).
 func (p *printer) writeControlIndent() {
+	if p.inOneLiner {
+		return
+	}
 	if p.inHTMLTag {
+		if p.inHTMLAttrValue {
+			return
+		}
+		// Multi-line tag: template control on its own line,
+		// indented one level deeper than the tag.
+		s := p.String()
+		if len(s) > 0 && s[len(s)-1] != '\n' {
+			p.WriteByte('\n')
+		}
+		n := p.totalIndent() + 1
+		if n > 0 {
+			p.WriteString(indent(n))
+		}
 		return
 	}
 	s := p.String()
@@ -132,7 +161,19 @@ func (p *printer) computeHTMLDeltas(text string) (pre, post int) {
 	minDelta := 0
 	for i := 0; i < len(text); i++ {
 		if p.inHTMLTag {
-			if text[i] == '>' {
+			switch text[i] {
+			case '"', '\'':
+				if p.htmlQuoteChar == 0 {
+					p.htmlQuoteChar = text[i]
+					p.inHTMLAttrValue = true
+				} else if p.htmlQuoteChar == text[i] {
+					p.htmlQuoteChar = 0
+					p.inHTMLAttrValue = false
+				}
+			case '>':
+				if p.inHTMLAttrValue {
+					continue
+				}
 				selfClose := i > 0 && text[i-1] == '/'
 				if selfClose || p.htmlTagIsVoid {
 					// no depth change
@@ -141,11 +182,29 @@ func (p *printer) computeHTMLDeltas(text string) (pre, post int) {
 					if delta < minDelta {
 						minDelta = delta
 					}
+				} else if p.htmlTagHadActions {
+					// Structural tag with template actions inside.
+					rest := strings.TrimSpace(text[i+1:])
+					closeTag := "</" + p.htmlTagName + ">"
+					if rest == "" {
+						// No content after >, auto-close for depth balance.
+						p.pendingCloseTag = p.htmlTagName
+						// Don't count depth (opening + auto-close = net 0).
+					} else if strings.HasPrefix(strings.ToLower(rest), closeTag) {
+						// Close tag already present (idempotent re-format).
+						// Don't count depth (balanced by existing close tag).
+					} else {
+						// Tag has actual content, treat as normal opening.
+						delta++
+					}
 				} else {
 					delta++
 				}
 				p.inHTMLTag = false
 				p.htmlTagIsVoid = false
+				p.htmlQuoteChar = 0
+				p.inHTMLAttrValue = false
+				p.htmlTagHadActions = false
 			}
 			continue
 		}
@@ -162,7 +221,7 @@ func (p *printer) computeHTMLDeltas(text string) (pre, post int) {
 		}
 		p.inHTMLTag = true
 		p.htmlTagIsClose = next == '/'
-		// Extract tag name for void element check.
+		// Extract tag name.
 		nameStart := i + 1
 		if p.htmlTagIsClose {
 			nameStart = i + 2
@@ -171,8 +230,13 @@ func (p *printer) computeHTMLDeltas(text string) (pre, post int) {
 		for nameEnd < len(text) && isTagNameChar(text[nameEnd]) {
 			nameEnd++
 		}
-		if !p.htmlTagIsClose && nameEnd > nameStart {
-			if voidElements[strings.ToLower(text[nameStart:nameEnd])] {
+		tagName := ""
+		if nameEnd > nameStart {
+			tagName = strings.ToLower(text[nameStart:nameEnd])
+		}
+		if !p.htmlTagIsClose {
+			p.htmlTagName = tagName
+			if voidElements[tagName] {
 				if j := strings.IndexByte(text[i:], '>'); j >= 0 {
 					// Void element closed on the same line — no depth change.
 					i += j
@@ -198,6 +262,11 @@ var voidElements = map[string]bool{
 	"embed": true, "hr": true, "img": true, "input": true,
 	"link": true, "meta": true, "param": true, "source": true,
 	"track": true, "wbr": true,
+}
+
+var rawContentElements = map[string]bool{
+	"script": true,
+	"style":  true,
 }
 
 func lineno(n Node) int {
@@ -287,10 +356,15 @@ func (l *ListNode) writeTo(sb *printer) {
 			for j := i + 1; j < len(l.Nodes); j++ {
 				if c2, ok := l.Nodes[j].(*CommentNode); ok && strings.Contains(c2.Text, directiveIgnoreEnd) {
 					src := l.tr.text
-					regionStart := strings.LastIndex(src[:int(c.Position())], "{{")
-					afterEnd := int(c2.Position()) + len(c2.Text)
-					regionEnd := afterEnd + strings.Index(src[afterEnd:], "}}") + 2
-					sb.WriteString(src[regionStart:regionEnd])
+					// Format the ignore-start comment with proper indentation.
+					c.writeTo(sb)
+					// Copy raw source between the two directive comments.
+					afterStart := int(c.Position()) + len(c.Text)
+					ignoreStartEnd := afterStart + strings.Index(src[afterStart:], "}}") + 2
+					ignoreEndStart := strings.LastIndex(src[:int(c2.Position())], "{{")
+					sb.WriteString(strings.TrimRight(src[ignoreStartEnd:ignoreEndStart], " \t"))
+					// Format the ignore-end comment with proper indentation.
+					c2.writeTo(sb)
 					i = j
 					found = true
 					break
@@ -320,10 +394,83 @@ func (t *TextNode) String() string {
 	return fmt.Sprintf(textFormat, t.Text)
 }
 
+type rawLineType int
+
+const (
+	rawNone    rawLineType = iota
+	rawTagLine             // the <script>/<style> or </script>/</style> line itself
+	rawContent             // content between the open and close tags
+)
+
+type rawContentRange struct {
+	openLine  int
+	closeLine int
+}
+
+// findRawContentRanges finds <script> and <style> blocks where both
+// opening and closing tags are in the same TextNode (no template actions).
+func findRawContentRanges(lines []string) []rawContentRange {
+	var ranges []rawContentRange
+	skip := -1
+	for i, line := range lines {
+		if i <= skip {
+			continue
+		}
+		trimmed := strings.TrimLeft(line, " \t")
+		lower := strings.ToLower(trimmed)
+		for tag := range rawContentElements {
+			if strings.HasPrefix(lower, "<"+tag) && !strings.HasPrefix(lower, "</"+tag) {
+				closeTag := "</" + tag + ">"
+				for j := i + 1; j < len(lines); j++ {
+					if strings.Contains(strings.ToLower(lines[j]), closeTag) {
+						ranges = append(ranges, rawContentRange{openLine: i, closeLine: j})
+						skip = j
+						break
+					}
+				}
+				break
+			}
+		}
+	}
+	return ranges
+}
+
+func rawLineKind(lineIdx int, ranges []rawContentRange) rawLineType {
+	for _, r := range ranges {
+		if lineIdx == r.openLine || lineIdx == r.closeLine {
+			return rawTagLine
+		}
+		if lineIdx > r.openLine && lineIdx < r.closeLine {
+			return rawContent
+		}
+	}
+	return rawNone
+}
+
 func (t *TextNode) writeTo(sb *printer) {
-	lines := strings.Split(t.Text, "\n")
+	text := t.Text
+	// Right trim: strip leading whitespace from text following a -}} delimiter.
+	if sb.rightTrimPending {
+		text = strings.TrimLeft(text, " \t\n\r")
+		sb.rightTrimPending = false
+	}
+	lines := strings.Split(text, "\n")
+
+	// Find raw content element ranges (<script>, <style>) where both
+	// opening and closing tags are in this TextNode. These have no
+	// template actions inside, so their content is preserved verbatim.
+	rawRanges := findRawContentRanges(lines)
+
 	for i, line := range lines {
 		if i > 0 {
+			// Check if this line is inside a raw content element.
+			rawKind := rawLineKind(i, rawRanges)
+			if rawKind == rawContent {
+				sb.WriteByte('\n')
+				sb.WriteString(line)
+				continue
+			}
+
 			trimmed := strings.TrimLeft(line, " \t")
 			if trimmed == "" {
 				sb.WriteByte('\n')
@@ -355,6 +502,12 @@ func (t *TextNode) writeTo(sb *printer) {
 				sb.WriteByte('\n')
 				wasInTag := sb.inHTMLTag
 				pre, post := sb.computeHTMLDeltas(seg)
+				// Suppress depth changes for raw content element tags
+				// (<script>, <style>) that have no template actions inside.
+				if rawKind == rawTagLine {
+					pre = 0
+					post = 0
+				}
 				sb.htmlDepth += pre
 				if sb.htmlDepth < 0 {
 					sb.htmlDepth = 0
@@ -367,6 +520,10 @@ func (t *TextNode) writeTo(sb *printer) {
 				}
 				sb.WriteString(indent(sb.totalIndent() + extra))
 				sb.WriteString(seg)
+				if sb.pendingCloseTag != "" {
+					sb.WriteString("</" + sb.pendingCloseTag + ">")
+					sb.pendingCloseTag = ""
+				}
 				sb.htmlDepth += post
 				if sb.htmlDepth < 0 {
 					sb.htmlDepth = 0
@@ -375,12 +532,20 @@ func (t *TextNode) writeTo(sb *printer) {
 		} else {
 			// First line continues on the same line as the previous node.
 			// Tags affect depth for subsequent lines but no indent is written.
+			if sb.oneLinerHTMLIndent {
+				// Indented one-liner in multi-line tag: trim spaces around content.
+				line = strings.Trim(line, " \t")
+			}
 			pre, post := sb.computeHTMLDeltas(line)
 			sb.htmlDepth += pre + post
 			if sb.htmlDepth < 0 {
 				sb.htmlDepth = 0
 			}
 			sb.WriteString(line)
+			if sb.pendingCloseTag != "" {
+				sb.WriteString("</" + sb.pendingCloseTag + ">")
+				sb.pendingCloseTag = ""
+			}
 		}
 	}
 }
@@ -392,12 +557,27 @@ func (p *printer) splitHTMLLine(line string) []string {
 	// Save tag state — we're peeking ahead, not consuming.
 	savedInTag := p.inHTMLTag
 	savedIsClose := p.htmlTagIsClose
+	savedQuoteChar := p.htmlQuoteChar
+	savedInAttrValue := p.inHTMLAttrValue
 
 	depth := 0
 	var splits []int
 	for i := 0; i < len(line); i++ {
 		if p.inHTMLTag {
-			if line[i] == '>' {
+			switch line[i] {
+			case '"', '\'':
+				if p.htmlQuoteChar == 0 {
+					p.htmlQuoteChar = line[i]
+					p.inHTMLAttrValue = true
+				} else if p.htmlQuoteChar == line[i] {
+					p.htmlQuoteChar = 0
+					p.inHTMLAttrValue = false
+				}
+				continue
+			case '>':
+				if p.inHTMLAttrValue {
+					continue
+				}
 				selfClose := i > 0 && line[i-1] == '/'
 				if selfClose {
 					// no depth change
@@ -407,6 +587,8 @@ func (p *printer) splitHTMLLine(line string) []string {
 					depth++
 				}
 				p.inHTMLTag = false
+				p.htmlQuoteChar = 0
+				p.inHTMLAttrValue = false
 				// If depth dropped below 0 after this tag, split before the '<' of this tag.
 				if depth < 0 {
 					// Find the '<' that started this tag by scanning back.
@@ -416,6 +598,8 @@ func (p *printer) splitHTMLLine(line string) []string {
 					}
 					depth = 0 // reset for next segment
 				}
+			default:
+				continue
 			}
 			continue
 		}
@@ -440,7 +624,8 @@ func (p *printer) splitHTMLLine(line string) []string {
 			nameEnd++
 		}
 		if !p.htmlTagIsClose && nameEnd > nameStart {
-			if voidElements[strings.ToLower(line[nameStart:nameEnd])] {
+			tagName := strings.ToLower(line[nameStart:nameEnd])
+			if voidElements[tagName] || rawContentElements[tagName] {
 				if j := strings.IndexByte(line[i:], '>'); j >= 0 {
 					i += j
 				}
@@ -453,6 +638,8 @@ func (p *printer) splitHTMLLine(line string) []string {
 	// Restore tag state — computeHTMLDeltas will process the actual segments.
 	p.inHTMLTag = savedInTag
 	p.htmlTagIsClose = savedIsClose
+	p.htmlQuoteChar = savedQuoteChar
+	p.inHTMLAttrValue = savedInAttrValue
 
 	if len(splits) == 0 {
 		return []string{line}
@@ -675,9 +862,7 @@ func (c *CommandNode) writeTo(sb *printer) {
 		if arg, ok := arg.(*PipeNode); ok {
 			sb.WriteByte('(')
 			before := strings.Count(sb.String(), "\n")
-			sb.depth++
 			arg.writeTo(sb)
-			sb.depth--
 			after := strings.Count(sb.String(), "\n")
 			if ok && before != after {
 				sb.WriteString("\n")
@@ -1117,6 +1302,9 @@ func (e *EndNode) writeTo(sb *printer) {
 	sb.WriteString(e.Trim.leftDelim())
 	sb.WriteString("end")
 	sb.WriteString(e.Trim.rightDelim())
+	if e.Trim.right && sb.inHTMLTag {
+		sb.rightTrimPending = true
+	}
 }
 
 func (e *EndNode) tree() *Tree {
@@ -1150,7 +1338,7 @@ func (e *ElseNode) String() string {
 }
 
 func (e *ElseNode) writeTo(sb *printer) {
-	inAttr := sb.inHTMLTag
+	inAttrValue := sb.inHTMLTag && sb.inHTMLAttrValue
 	sb.writeControlIndent()
 	sb.WriteString(e.Trim.leftDelim())
 	sb.WriteString("else")
@@ -1163,12 +1351,15 @@ func (e *ElseNode) writeTo(sb *printer) {
 		}
 	}
 	sb.WriteString(e.Trim.rightDelim())
+	if sb.inHTMLTag && !sb.inHTMLAttrValue && !sb.inOneLiner {
+		sb.htmlTagHadActions = true
+	}
 	savedHTMLDepth := sb.htmlDepth
-	if !inAttr {
+	if !inAttrValue {
 		sb.branchDepth++
 	}
 	e.List.writeTo(sb)
-	if !inAttr {
+	if !inAttrValue {
 		sb.branchDepth--
 	}
 	sb.htmlDepth = savedHTMLDepth
@@ -1199,21 +1390,85 @@ func (b *BranchNode) String() string {
 }
 
 func (b *BranchNode) writeTo(sb *printer) {
-	inAttr := sb.inHTMLTag
-	sb.writeControlIndent()
+	inAttrValue := sb.inHTMLTag && sb.inHTMLAttrValue
+
+	// Detect one-liner branches (start and end on the same source line).
+	savedOneLiner := sb.inOneLiner
+	if lineno(b) == lineno(b.End) {
+		sb.inOneLiner = true
+	}
+
+	if sb.inOneLiner {
+		if sb.inHTMLTag && !sb.inHTMLAttrValue {
+			// One-liner inside HTML tag: indent as attribute if at start of line.
+			s := sb.String()
+			if len(s) == 0 || s[len(s)-1] == '\n' {
+				n := sb.totalIndent() + 1
+				if n > 0 {
+					sb.WriteString(indent(n))
+				}
+				sb.oneLinerHTMLIndent = true
+			}
+		} else {
+			// One-liner: add indent if at start of line, but don't force a newline.
+			sb.writeBranchIndent()
+		}
+	} else {
+		sb.writeControlIndent()
+	}
+
+	// Compute prefix for multi-line pipe formatting.
+	s := sb.String()
+	lastNL := strings.LastIndexByte(s, '\n')
+	afterNL := s
+	if lastNL >= 0 {
+		afterNL = s[lastNL+1:]
+	}
+	onOwnLine := strings.TrimLeft(afterNL, " \t") == ""
+	if onOwnLine {
+		sb.prefix = afterNL
+	} else {
+		sb.prefix = ""
+	}
+
 	sb.WriteString(b.Trim.leftDelim())
 	sb.WriteString(b.Keyword)
 	if len(b.Pipe.Cmds) > 0 {
 		sb.WriteByte(' ')
+		before := strings.Count(sb.String(), "\n")
+		sb.depth = 1
 		b.Pipe.writeTo(sb)
+		sb.depth = 0
+		cur := sb.String()
+		after := strings.Count(cur, "\n")
+		if before != after {
+			if cur[len(cur)-1] != '`' {
+				sb.WriteString("\n")
+				if onOwnLine {
+					sb.WritePrefix()
+				}
+				sb.WriteString(b.Trim.rightDelimNoSpace())
+			} else {
+				sb.WriteString(b.Trim.rightDelim())
+			}
+		} else {
+			sb.WriteString(b.Trim.rightDelim())
+		}
+	} else {
+		sb.WriteString(b.Trim.rightDelim())
 	}
-	sb.WriteString(b.Trim.rightDelim())
+
+	if sb.inHTMLTag && !sb.inHTMLAttrValue && !sb.inOneLiner {
+		sb.htmlTagHadActions = true
+	}
+
 	savedHTMLDepth := sb.htmlDepth
-	if !inAttr {
+	indentBody := !inAttrValue && !sb.inOneLiner && b.Keyword != "define"
+	if indentBody {
 		sb.branchDepth++
 	}
 	b.List.writeTo(sb)
-	if !inAttr {
+	if indentBody {
 		sb.branchDepth--
 	}
 	for _, e := range b.Elses {
@@ -1222,6 +1477,8 @@ func (b *BranchNode) writeTo(sb *printer) {
 	}
 	sb.htmlDepth = savedHTMLDepth
 	b.End.writeTo(sb)
+	sb.inOneLiner = savedOneLiner
+	sb.oneLinerHTMLIndent = false
 }
 
 func (b *BranchNode) tree() *Tree {

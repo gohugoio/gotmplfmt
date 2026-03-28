@@ -1,0 +1,17 @@
+{{ $class := "" }}
+{{ $divStyle := "" }}
+{{ if true }}
+	<div
+{{- with $class }}
+		class="{{ . }}"
+{{- else }}
+		style="{{ $divStyle | safeCSS }}"
+{{- end }}>
+{{ end }}
+
+<div
+{{- with "foo" }} class="{{ . }}" {{- end }}
+{{- with "bar" }} style="{{ . | safeCSS }}" {{- end -}}
+>
+{{ .Content }}
+</div>

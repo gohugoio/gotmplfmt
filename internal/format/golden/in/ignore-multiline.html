@@ -1,13 +1,8 @@
 <html>
 {{ if .Foo }}
     {{/* gotmplfmt-ignore-start */}}
-            <script>
-                {{if .}}
-                Whatever.
-                {{else}}
-                Psych.
-                {{end}}
-            </script>
+    {{ range .Bar }}
+       {{ end }}
     {{/* gotmplfmt-ignore-end */}}
 {{ end }}
 </html>

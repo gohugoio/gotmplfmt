@@ -24,6 +24,9 @@ func main() {
 	flag.Parse()
 
 	if flag.NArg() == 0 {
+		if *writeFlag {
+			log.Fatal("error: cannot use -w with standard input")
+		}
 		if err := processReader(os.Stdin, os.Stdout); err != nil {
 			log.Fatal(err)
 		}
