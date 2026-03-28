@@ -108,7 +108,12 @@ func (p *printer) writeBranchIndent() {
 // writeControlIndent is like writeBranchIndent but forces a newline if the
 // output doesn't already end with one. Used for template control structures
 // (end, else, if, range, etc.) which must always start on their own line.
+// When inside an HTML tag (attribute value context), newlines and indentation
+// are suppressed to keep the attribute on a single line.
 func (p *printer) writeControlIndent() {
+	if p.inHTMLTag {
+		return
+	}
 	s := p.String()
 	if len(s) > 0 && s[len(s)-1] != '\n' {
 		p.WriteByte('\n')
@@ -1145,6 +1150,7 @@ func (e *ElseNode) String() string {
 }
 
 func (e *ElseNode) writeTo(sb *printer) {
+	inAttr := sb.inHTMLTag
 	sb.writeControlIndent()
 	sb.WriteString(e.Trim.leftDelim())
 	sb.WriteString("else")
@@ -1158,9 +1164,13 @@ func (e *ElseNode) writeTo(sb *printer) {
 	}
 	sb.WriteString(e.Trim.rightDelim())
 	savedHTMLDepth := sb.htmlDepth
-	sb.branchDepth++
+	if !inAttr {
+		sb.branchDepth++
+	}
 	e.List.writeTo(sb)
-	sb.branchDepth--
+	if !inAttr {
+		sb.branchDepth--
+	}
 	sb.htmlDepth = savedHTMLDepth
 }
 
@@ -1189,6 +1199,7 @@ func (b *BranchNode) String() string {
 }
 
 func (b *BranchNode) writeTo(sb *printer) {
+	inAttr := sb.inHTMLTag
 	sb.writeControlIndent()
 	sb.WriteString(b.Trim.leftDelim())
 	sb.WriteString(b.Keyword)
@@ -1198,9 +1209,13 @@ func (b *BranchNode) writeTo(sb *printer) {
 	}
 	sb.WriteString(b.Trim.rightDelim())
 	savedHTMLDepth := sb.htmlDepth
-	sb.branchDepth++
+	if !inAttr {
+		sb.branchDepth++
+	}
 	b.List.writeTo(sb)
-	sb.branchDepth--
+	if !inAttr {
+		sb.branchDepth--
+	}
 	for _, e := range b.Elses {
 		sb.htmlDepth = savedHTMLDepth
 		e.writeTo(sb)
