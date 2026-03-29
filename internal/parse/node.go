@@ -62,28 +62,133 @@ func (p Pos) Position() Pos {
 	return p
 }
 
+// htmlScanner tracks state while scanning HTML tags in text content.
+// It is embedded in the printer and shared between computeHTMLDeltas
+// and splitHTMLLine to avoid duplicating scanning logic.
+type htmlScanner struct {
+	inTag       bool   // inside a '<' that hasn't been closed with '>'
+	isClose     bool   // the current incomplete tag is a closing tag
+	isVoid      bool   // the current incomplete tag is a void element
+	tagName     string // tag name of the current open tag
+	quoteChar   byte   // 0 if not in attr value, '"' or '\'' otherwise
+	inAttrValue bool   // inside a quoted attribute value within a tag
+	tagStartIdx int    // index of '<' that opened the current tag
+}
+
+// save returns a snapshot of the scanner state for later restoration.
+func (s htmlScanner) save() htmlScanner { return s }
+
+// scanText processes text character by character, calling onTagClose for each
+// completed tag. Tags spanning beyond the text leave the scanner in an open
+// state. Returns the index to continue scanning from (for callers that
+// skip ahead, e.g. void elements).
+func (s *htmlScanner) scanText(text string, onTagClose func(tag tagEvent)) {
+	for i := 0; i < len(text); i++ {
+		if s.inTag {
+			switch text[i] {
+			case '"', '\'':
+				if s.quoteChar == 0 {
+					s.quoteChar = text[i]
+					s.inAttrValue = true
+				} else if s.quoteChar == text[i] {
+					s.quoteChar = 0
+					s.inAttrValue = false
+				}
+			case '>':
+				if s.inAttrValue {
+					continue
+				}
+				selfClose := i > 0 && text[i-1] == '/'
+				onTagClose(tagEvent{
+					Name:      s.tagName,
+					IsClose:   s.isClose,
+					IsVoid:    s.isVoid,
+					SelfClose: selfClose,
+					StartIdx:  s.tagStartIdx,
+					EndIdx:    i,
+				})
+				s.inTag = false
+				s.isVoid = false
+				s.quoteChar = 0
+				s.inAttrValue = false
+			}
+			continue
+		}
+		if text[i] != '<' || i+1 >= len(text) {
+			continue
+		}
+		next := text[i+1]
+		// Skip doctype, comments, processing instructions.
+		if next == '!' || next == '?' {
+			if j := strings.IndexByte(text[i:], '>'); j >= 0 {
+				i += j
+			}
+			continue
+		}
+		s.inTag = true
+		s.isClose = next == '/'
+		s.tagStartIdx = i
+		// Extract tag name.
+		nameStart := i + 1
+		if s.isClose {
+			nameStart = i + 2
+		}
+		nameEnd := nameStart
+		for nameEnd < len(text) && isTagNameChar(text[nameEnd]) {
+			nameEnd++
+		}
+		tagName := ""
+		if nameEnd > nameStart {
+			tagName = strings.ToLower(text[nameStart:nameEnd])
+		}
+		s.tagName = tagName
+		if !s.isClose && voidElements[tagName] {
+			if j := strings.IndexByte(text[i:], '>'); j >= 0 {
+				// Void element closed on the same line — no depth change.
+				onTagClose(tagEvent{
+					Name:     tagName,
+					IsVoid:   true,
+					StartIdx: i,
+					EndIdx:   i + j,
+				})
+				i += j
+				s.inTag = false
+				continue
+			}
+			// Void element spans beyond text; keep inTag open
+			// so attribute lines get extra indentation.
+			s.isVoid = true
+		}
+	}
+}
+
+// tagEvent represents a completed HTML tag found during scanning.
+type tagEvent struct {
+	Name      string
+	IsClose   bool
+	IsVoid    bool
+	SelfClose bool
+	StartIdx  int // index of '<' in the scanned text
+	EndIdx    int // index of '>' in the scanned text
+}
+
 type printer struct {
 	*strings.Builder
 	prefix      string
 	depth       int
 	branchDepth int
+	htmlDepth   int
 
-	// HTML-aware indentation state.
-	htmlDepth      int
-	inHTMLTag      bool // inside a '<' that hasn't been closed with '>'
-	htmlTagIsClose bool // the current incomplete tag is a closing tag
-	htmlTagIsVoid  bool // the current incomplete tag is a void element
+	html htmlScanner // HTML tag tracking state
 
+	// Signals set by template actions for cross-node communication.
+	htmlTagHadActions bool   // a template action was written while an HTML tag was open
+	pendingCloseTag   string // tag name to auto-close after '>'
+
+	// Branch-scoped formatting flags (saved/restored per branch).
 	inOneLiner         bool // inside a one-liner branch (suppress newlines for else/end)
 	oneLinerHTMLIndent bool // one-liner was indented as attribute in multi-line HTML tag
 	rightTrimPending   bool // right trim: strip leading whitespace from the next text node
-
-	// Multi-line HTML tag tracking.
-	htmlTagName       string // tag name of the current open tag
-	htmlQuoteChar     byte   // 0 if not in attr value, '"' or '\'' otherwise
-	inHTMLAttrValue   bool   // inside a quoted attribute value within a tag
-	htmlTagHadActions bool   // a template action was written while this tag was open
-	pendingCloseTag   string // tag name to auto-close after '>'
 }
 
 func newPrinter() *printer {
@@ -104,6 +209,53 @@ func (p *printer) totalIndent() int {
 func (p *printer) WritePrefix() {
 	p.WriteString(p.prefix)
 	p.WriteString(indent(p.depth))
+}
+
+// writeAction writes a template action: {{ keyword pipe }} or {{ pipe }}.
+// It handles multi-line pipes by computing a prefix from the current output
+// line and placing the closing delimiter on its own indented line.
+// keyword is empty for plain actions (ActionNode) and "if"/"with"/etc. for branches.
+func (p *printer) writeAction(keyword string, pipe *PipeNode, tr trim) {
+	// Compute prefix for multi-line pipe formatting.
+	s := p.String()
+	lastNL := strings.LastIndexByte(s, '\n')
+	afterNL := s
+	if lastNL >= 0 {
+		afterNL = s[lastNL+1:]
+	}
+	onOwnLine := strings.TrimLeft(afterNL, " \t") == ""
+	if onOwnLine {
+		p.prefix = afterNL
+	} else {
+		p.prefix = ""
+	}
+
+	p.WriteString(tr.leftDelim())
+	if keyword != "" {
+		p.WriteString(keyword)
+	}
+	if len(pipe.Cmds) > 0 {
+		if keyword != "" {
+			p.WriteByte(' ')
+		}
+		before := strings.Count(p.String(), "\n")
+		p.depth = 1
+		pipe.writeTo(p)
+		p.depth = 0
+		cur := p.String()
+		after := strings.Count(cur, "\n")
+		if before != after && cur[len(cur)-1] != '`' {
+			p.WriteString("\n")
+			if onOwnLine {
+				p.WritePrefix()
+			}
+			p.WriteString(tr.rightDelimNoSpace())
+		} else {
+			p.WriteString(tr.rightDelim())
+		}
+	} else {
+		p.WriteString(tr.rightDelim())
+	}
 }
 
 func (p *printer) writeBranchIndent() {
@@ -127,8 +279,8 @@ func (p *printer) writeControlIndent() {
 	if p.inOneLiner {
 		return
 	}
-	if p.inHTMLTag {
-		if p.inHTMLAttrValue {
+	if p.html.inTag {
+		if p.html.inAttrValue {
 			return
 		}
 		// Multi-line tag: template control on its own line,
@@ -159,97 +311,32 @@ func (p *printer) writeControlIndent() {
 func (p *printer) computeHTMLDeltas(text string) (pre, post int) {
 	delta := 0
 	minDelta := 0
-	for i := 0; i < len(text); i++ {
-		if p.inHTMLTag {
-			switch text[i] {
-			case '"', '\'':
-				if p.htmlQuoteChar == 0 {
-					p.htmlQuoteChar = text[i]
-					p.inHTMLAttrValue = true
-				} else if p.htmlQuoteChar == text[i] {
-					p.htmlQuoteChar = 0
-					p.inHTMLAttrValue = false
-				}
-			case '>':
-				if p.inHTMLAttrValue {
-					continue
-				}
-				selfClose := i > 0 && text[i-1] == '/'
-				if selfClose || p.htmlTagIsVoid {
-					// no depth change
-				} else if p.htmlTagIsClose {
-					delta--
-					if delta < minDelta {
-						minDelta = delta
-					}
-				} else if p.htmlTagHadActions {
-					// Structural tag with template actions inside.
-					rest := strings.TrimSpace(text[i+1:])
-					closeTag := "</" + p.htmlTagName + ">"
-					if rest == "" {
-						// No content after >, auto-close for depth balance.
-						p.pendingCloseTag = p.htmlTagName
-						// Don't count depth (opening + auto-close = net 0).
-					} else if strings.HasPrefix(strings.ToLower(rest), closeTag) {
-						// Close tag already present (idempotent re-format).
-						// Don't count depth (balanced by existing close tag).
-					} else {
-						// Tag has actual content, treat as normal opening.
-						delta++
-					}
-				} else {
-					delta++
-				}
-				p.inHTMLTag = false
-				p.htmlTagIsVoid = false
-				p.htmlQuoteChar = 0
-				p.inHTMLAttrValue = false
-				p.htmlTagHadActions = false
+	p.html.scanText(text, func(tag tagEvent) {
+		if tag.SelfClose || tag.IsVoid {
+			// no depth change
+		} else if tag.IsClose {
+			delta--
+			if delta < minDelta {
+				minDelta = delta
 			}
-			continue
-		}
-		if text[i] != '<' || i+1 >= len(text) {
-			continue
-		}
-		next := text[i+1]
-		// Skip doctype, comments, processing instructions.
-		if next == '!' || next == '?' {
-			if j := strings.IndexByte(text[i:], '>'); j >= 0 {
-				i += j
+		} else if p.htmlTagHadActions {
+			// Structural tag with template actions inside.
+			rest := strings.TrimSpace(text[tag.EndIdx+1:])
+			closeTag := "</" + tag.Name + ">"
+			if rest == "" {
+				// No content after >, auto-close for depth balance.
+				p.pendingCloseTag = tag.Name
+			} else if strings.HasPrefix(strings.ToLower(rest), closeTag) {
+				// Close tag already present (idempotent re-format).
+			} else {
+				// Tag has actual content, treat as normal opening.
+				delta++
 			}
-			continue
+		} else {
+			delta++
 		}
-		p.inHTMLTag = true
-		p.htmlTagIsClose = next == '/'
-		// Extract tag name.
-		nameStart := i + 1
-		if p.htmlTagIsClose {
-			nameStart = i + 2
-		}
-		nameEnd := nameStart
-		for nameEnd < len(text) && isTagNameChar(text[nameEnd]) {
-			nameEnd++
-		}
-		tagName := ""
-		if nameEnd > nameStart {
-			tagName = strings.ToLower(text[nameStart:nameEnd])
-		}
-		if !p.htmlTagIsClose {
-			p.htmlTagName = tagName
-			if voidElements[tagName] {
-				if j := strings.IndexByte(text[i:], '>'); j >= 0 {
-					// Void element closed on the same line — no depth change.
-					i += j
-					p.inHTMLTag = false
-					continue
-				}
-				// Void element spans multiple lines; keep inHTMLTag open
-				// so attribute lines get extra indentation.
-				p.htmlTagIsVoid = true
-				continue
-			}
-		}
-	}
+		p.htmlTagHadActions = false
+	})
 	return minDelta, delta - minDelta
 }
 
@@ -269,10 +356,13 @@ var rawContentElements = map[string]bool{
 	"style":  true,
 }
 
+// liner is implemented by nodes that store their source line number.
+type liner interface {
+	lineNumber() int
+}
+
 func lineno(n Node) int {
-	// TODO: common uses will be quadratic!
-	// it would be easy to put in place a simple lookup structure instead at some point
-	return strings.Count(n.tree().text[:n.Position()], "\n")
+	return n.(liner).lineNumber()
 }
 
 // Type returns itself and provides an easy default implementation
@@ -383,11 +473,16 @@ type TextNode struct {
 	NodeType
 	Pos
 	tr   *Tree
+	Line int
 	Text string // The text; may span newlines.
 }
 
-func (t *Tree) newText(pos Pos, text string) *TextNode {
-	return &TextNode{tr: t, NodeType: NodeText, Pos: pos, Text: text}
+func (t *Tree) newText(pos Pos, text string, line int) *TextNode {
+	return &TextNode{tr: t, NodeType: NodeText, Pos: pos, Line: line, Text: text}
+}
+
+func (t *TextNode) lineNumber() int {
+	return t.Line
 }
 
 func (t *TextNode) String() string {
@@ -462,91 +557,104 @@ func (t *TextNode) writeTo(sb *printer) {
 	rawRanges := findRawContentRanges(lines)
 
 	for i, line := range lines {
-		if i > 0 {
-			// Check if this line is inside a raw content element.
-			rawKind := rawLineKind(i, rawRanges)
-			if rawKind == rawContent {
-				sb.WriteByte('\n')
-				sb.WriteString(line)
-				continue
-			}
-
-			trimmed := strings.TrimLeft(line, " \t")
-			if trimmed == "" {
-				sb.WriteByte('\n')
-				continue
-			}
-			// Strip trailing whitespace from the last line of the TextNode,
-			// which sits between content and the next template action.
-			// Preserve a trailing space when it looks like inline content
-			// spacing (e.g. "* {{ .Name }}") rather than indentation
-			// between tags and actions (e.g. "</ul>\t\t{{ end }}").
-			if i == len(lines)-1 {
-				t := strings.TrimRight(trimmed, " \t")
-				if t == "" {
-					continue
-				}
-				tail := trimmed[len(t):]
-				if strings.ContainsRune(tail, '\t') {
-					// Tabs signal indentation — strip entirely.
-					trimmed = t
-				} else if len(tail) > 0 {
-					// Space-only tail — preserve a single space.
-					trimmed = t + " "
-				}
-			}
-			// Split the line at tag boundaries where depth drops,
-			// so closing tags that end a nesting level get their own line.
-			segments := sb.splitHTMLLine(trimmed)
-			for _, seg := range segments {
-				sb.WriteByte('\n')
-				wasInTag := sb.inHTMLTag
-				pre, post := sb.computeHTMLDeltas(seg)
-				// Suppress depth changes for raw content element tags
-				// (<script>, <style>) that have no template actions inside.
-				if rawKind == rawTagLine {
-					pre = 0
-					post = 0
-				}
-				sb.htmlDepth += pre
-				if sb.htmlDepth < 0 {
-					sb.htmlDepth = 0
-				}
-				extra := 0
-				if wasInTag && sb.inHTMLTag {
-					// Continuation line inside a multiline HTML tag
-					// (e.g. attributes) — indent one level deeper.
-					extra = 1
-				}
-				sb.WriteString(indent(sb.totalIndent() + extra))
-				sb.WriteString(seg)
-				if sb.pendingCloseTag != "" {
-					sb.WriteString("</" + sb.pendingCloseTag + ">")
-					sb.pendingCloseTag = ""
-				}
-				sb.htmlDepth += post
-				if sb.htmlDepth < 0 {
-					sb.htmlDepth = 0
-				}
-			}
+		if i == 0 {
+			sb.writeTextFirstLine(line)
 		} else {
-			// First line continues on the same line as the previous node.
-			// Tags affect depth for subsequent lines but no indent is written.
-			if sb.oneLinerHTMLIndent {
-				// Indented one-liner in multi-line tag: trim spaces around content.
-				line = strings.Trim(line, " \t")
-			}
-			pre, post := sb.computeHTMLDeltas(line)
-			sb.htmlDepth += pre + post
-			if sb.htmlDepth < 0 {
-				sb.htmlDepth = 0
-			}
-			sb.WriteString(line)
-			if sb.pendingCloseTag != "" {
-				sb.WriteString("</" + sb.pendingCloseTag + ">")
-				sb.pendingCloseTag = ""
-			}
+			sb.writeTextLine(line, rawLineKind(i, rawRanges), i == len(lines)-1)
 		}
+	}
+}
+
+// writeTextFirstLine writes the first line of a TextNode, which continues
+// on the same line as the previous node (no newline or indent is added).
+func (p *printer) writeTextFirstLine(line string) {
+	if p.oneLinerHTMLIndent {
+		// Indented one-liner in multi-line tag: trim spaces around content.
+		line = strings.Trim(line, " \t")
+	}
+	pre, post := p.computeHTMLDeltas(line)
+	p.htmlDepth += pre + post
+	if p.htmlDepth < 0 {
+		p.htmlDepth = 0
+	}
+	p.WriteString(line)
+	p.writePendingCloseTag()
+}
+
+// writeTextLine writes a subsequent (non-first) line of a TextNode.
+func (p *printer) writeTextLine(line string, rawKind rawLineType, isLast bool) {
+	// Raw content inside <script>/<style>: write verbatim.
+	if rawKind == rawContent {
+		p.WriteByte('\n')
+		p.WriteString(line)
+		return
+	}
+
+	trimmed := strings.TrimLeft(line, " \t")
+	if trimmed == "" {
+		p.WriteByte('\n')
+		return
+	}
+
+	// Strip trailing whitespace from the last line of the TextNode,
+	// which sits between content and the next template action.
+	// Preserve a trailing space when it looks like inline content
+	// spacing (e.g. "* {{ .Name }}") rather than indentation
+	// between tags and actions (e.g. "</ul>\t\t{{ end }}").
+	if isLast {
+		t := strings.TrimRight(trimmed, " \t")
+		if t == "" {
+			return
+		}
+		tail := trimmed[len(t):]
+		if strings.ContainsRune(tail, '\t') {
+			trimmed = t
+		} else if len(tail) > 0 {
+			trimmed = t + " "
+		}
+	}
+
+	// Split the line at tag boundaries where depth drops,
+	// so closing tags that end a nesting level get their own line.
+	for _, seg := range p.splitHTMLLine(trimmed) {
+		p.WriteByte('\n')
+		p.writeHTMLSegment(seg, rawKind == rawTagLine)
+	}
+}
+
+// writeHTMLSegment writes a single segment of an HTML line, computing
+// indentation from the HTML tag depth.
+func (p *printer) writeHTMLSegment(seg string, suppressDepth bool) {
+	wasInTag := p.html.inTag
+	pre, post := p.computeHTMLDeltas(seg)
+	if suppressDepth {
+		pre = 0
+		post = 0
+	}
+	p.htmlDepth += pre
+	if p.htmlDepth < 0 {
+		p.htmlDepth = 0
+	}
+	extra := 0
+	if wasInTag && p.html.inTag {
+		// Continuation line inside a multiline HTML tag
+		// (e.g. attributes) — indent one level deeper.
+		extra = 1
+	}
+	p.WriteString(indent(p.totalIndent() + extra))
+	p.WriteString(seg)
+	p.writePendingCloseTag()
+	p.htmlDepth += post
+	if p.htmlDepth < 0 {
+		p.htmlDepth = 0
+	}
+}
+
+// writePendingCloseTag appends an auto-closing tag if one is pending.
+func (p *printer) writePendingCloseTag() {
+	if p.pendingCloseTag != "" {
+		p.WriteString("</" + p.pendingCloseTag + ">")
+		p.pendingCloseTag = ""
 	}
 }
 
@@ -554,92 +662,32 @@ func (t *TextNode) writeTo(sb *printer) {
 // depth below the line's starting depth. For example, "<div></div></div>" becomes
 // ["<div></div>", "</div>"] because the second </div> closes a tag from a previous line.
 func (p *printer) splitHTMLLine(line string) []string {
-	// Save tag state — we're peeking ahead, not consuming.
-	savedInTag := p.inHTMLTag
-	savedIsClose := p.htmlTagIsClose
-	savedQuoteChar := p.htmlQuoteChar
-	savedInAttrValue := p.inHTMLAttrValue
+	// Peek ahead with a temporary scanner copy — computeHTMLDeltas will
+	// process the actual segments and update the real scanner state.
+	tmp := p.html.save()
 
 	depth := 0
 	var splits []int
-	for i := 0; i < len(line); i++ {
-		if p.inHTMLTag {
-			switch line[i] {
-			case '"', '\'':
-				if p.htmlQuoteChar == 0 {
-					p.htmlQuoteChar = line[i]
-					p.inHTMLAttrValue = true
-				} else if p.htmlQuoteChar == line[i] {
-					p.htmlQuoteChar = 0
-					p.inHTMLAttrValue = false
-				}
-				continue
-			case '>':
-				if p.inHTMLAttrValue {
-					continue
-				}
-				selfClose := i > 0 && line[i-1] == '/'
-				if selfClose {
-					// no depth change
-				} else if p.htmlTagIsClose {
-					depth--
-				} else {
-					depth++
-				}
-				p.inHTMLTag = false
-				p.htmlQuoteChar = 0
-				p.inHTMLAttrValue = false
-				// If depth dropped below 0 after this tag, split before the '<' of this tag.
-				if depth < 0 {
-					// Find the '<' that started this tag by scanning back.
-					lt := strings.LastIndex(line[:i], "<")
-					if lt >= 0 && (len(splits) == 0 || lt > splits[len(splits)-1]) {
-						splits = append(splits, lt)
-					}
-					depth = 0 // reset for next segment
-				}
-			default:
-				continue
+	tmp.scanText(line, func(tag tagEvent) {
+		if tag.SelfClose || tag.IsVoid || rawContentElements[tag.Name] {
+			return
+		}
+		if tag.IsClose {
+			depth--
+		} else {
+			depth++
+		}
+		if depth < 0 {
+			// Find the '<' that started this tag within the current line.
+			// We can't use tag.StartIdx because it may refer to a previous
+			// scanText call if the tag opened on a prior line.
+			lt := strings.LastIndex(line[:tag.EndIdx], "<")
+			if lt >= 0 && (len(splits) == 0 || lt > splits[len(splits)-1]) {
+				splits = append(splits, lt)
 			}
-			continue
+			depth = 0
 		}
-		if line[i] != '<' || i+1 >= len(line) {
-			continue
-		}
-		next := line[i+1]
-		if next == '!' || next == '?' {
-			if j := strings.IndexByte(line[i:], '>'); j >= 0 {
-				i += j
-			}
-			continue
-		}
-		p.inHTMLTag = true
-		p.htmlTagIsClose = next == '/'
-		nameStart := i + 1
-		if p.htmlTagIsClose {
-			nameStart = i + 2
-		}
-		nameEnd := nameStart
-		for nameEnd < len(line) && isTagNameChar(line[nameEnd]) {
-			nameEnd++
-		}
-		if !p.htmlTagIsClose && nameEnd > nameStart {
-			tagName := strings.ToLower(line[nameStart:nameEnd])
-			if voidElements[tagName] || rawContentElements[tagName] {
-				if j := strings.IndexByte(line[i:], '>'); j >= 0 {
-					i += j
-				}
-				p.inHTMLTag = false
-				continue
-			}
-		}
-	}
-
-	// Restore tag state — computeHTMLDeltas will process the actual segments.
-	p.inHTMLTag = savedInTag
-	p.htmlTagIsClose = savedIsClose
-	p.htmlQuoteChar = savedQuoteChar
-	p.inHTMLAttrValue = savedInAttrValue
+	})
 
 	if len(splits) == 0 {
 		return []string{line}
@@ -665,12 +713,17 @@ type CommentNode struct {
 	NodeType
 	Pos
 	tr   *Tree
+	Line int
 	Text string // Comment text.
 	Trim trim   // Trim markers.
 }
 
-func (t *Tree) newComment(pos Pos, text string, tr trim) *CommentNode {
-	return &CommentNode{tr: t, NodeType: NodeComment, Pos: pos, Text: text, Trim: tr}
+func (t *Tree) newComment(pos Pos, text string, tr trim, line int) *CommentNode {
+	return &CommentNode{tr: t, NodeType: NodeComment, Pos: pos, Line: line, Text: text, Trim: tr}
+}
+
+func (c *CommentNode) lineNumber() int {
+	return c.Line
 }
 
 func (c *CommentNode) String() string {
@@ -711,6 +764,10 @@ type PipeNode struct {
 
 func (t *Tree) newPipeline(pos Pos, line int, vars []*VariableNode) *PipeNode {
 	return &PipeNode{tr: t, NodeType: NodePipe, Pos: pos, Line: line, Decl: vars}
+}
+
+func (p *PipeNode) lineNumber() int {
+	return p.Line
 }
 
 func (p *PipeNode) append(command *CommandNode) {
@@ -765,6 +822,10 @@ func (t *Tree) newAction(pos Pos, line int, pipe *PipeNode, trim trim) *ActionNo
 	return &ActionNode{tr: t, NodeType: NodeAction, Pos: pos, Line: line, Pipe: pipe, Trim: trim}
 }
 
+func (a *ActionNode) lineNumber() int {
+	return a.Line
+}
+
 func (a *ActionNode) String() string {
 	sb := newPrinter()
 	a.writeTo(sb)
@@ -773,45 +834,7 @@ func (a *ActionNode) String() string {
 
 func (a *ActionNode) writeTo(sb *printer) {
 	sb.writeBranchIndent()
-	// Compute prefix from the builder output (what's on the current line
-	// before this action) rather than the original text, so that the prefix
-	// is stable across round trips even when text nodes strip whitespace.
-	s := sb.String()
-	lastNL := strings.LastIndexByte(s, '\n')
-	afterNL := s
-	if lastNL >= 0 {
-		afterNL = s[lastNL+1:]
-	}
-	ok := strings.TrimLeft(afterNL, " \t") == ""
-	if ok {
-		sb.prefix = afterNL
-	} else {
-		sb.prefix = ""
-	}
-	sb.WriteString(a.Trim.leftDelim())
-	before := strings.Count(sb.String(), "\n")
-	sb.depth = 1
-	a.Pipe.writeTo(sb)
-	sb.depth = 0
-	cur := sb.String()
-	after := strings.Count(cur, "\n")
-	if before != after {
-		// The pipe spans multiple lines. Put the closing delimiter on
-		// its own line, unless the multiline content comes from a raw
-		// string literal (ending with a backtick) — in that case keep
-		// the closing delimiter on the same line.
-		if cur[len(cur)-1] != '`' {
-			sb.WriteString("\n")
-			if ok {
-				sb.WritePrefix()
-			}
-			sb.WriteString(a.Trim.rightDelimNoSpace())
-		} else {
-			sb.WriteString(a.Trim.rightDelim())
-		}
-	} else {
-		sb.WriteString(a.Trim.rightDelim())
-	}
+	sb.writeAction("", a.Pipe, a.Trim)
 }
 
 func (a *ActionNode) tree() *Tree {
@@ -823,12 +846,17 @@ type CommandNode struct {
 	NodeType
 	Pos
 	tr   *Tree
+	Line int
 	Args []Node // Arguments in lexical order: Identifier, field, or constant.
 	Trim trim
 }
 
-func (t *Tree) newCommand(pos Pos) *CommandNode {
-	return &CommandNode{tr: t, NodeType: NodeCommand, Pos: pos}
+func (t *Tree) newCommand(pos Pos, line int) *CommandNode {
+	return &CommandNode{tr: t, NodeType: NodeCommand, Pos: pos, Line: line}
+}
+
+func (c *CommandNode) lineNumber() int {
+	return c.Line
 }
 
 func (c *CommandNode) append(arg Node) {
@@ -884,6 +912,7 @@ type IdentifierNode struct {
 	NodeType
 	Pos
 	tr    *Tree
+	Line  int
 	Ident string // The identifier's name.
 }
 
@@ -908,6 +937,17 @@ func (i *IdentifierNode) SetTree(t *Tree) *IdentifierNode {
 	return i
 }
 
+// SetLine sets the line number. NewIdentifier is a public method so we can't modify its signature.
+// Chained for convenience.
+func (i *IdentifierNode) SetLine(line int) *IdentifierNode {
+	i.Line = line
+	return i
+}
+
+func (i *IdentifierNode) lineNumber() int {
+	return i.Line
+}
+
 func (i *IdentifierNode) String() string {
 	return i.Ident
 }
@@ -926,11 +966,16 @@ type VariableNode struct {
 	NodeType
 	Pos
 	tr    *Tree
+	Line  int
 	Ident []string // Variable name and fields in lexical order.
 }
 
-func (t *Tree) newVariable(pos Pos, ident string) *VariableNode {
-	return &VariableNode{tr: t, NodeType: NodeVariable, Pos: pos, Ident: strings.Split(ident, ".")}
+func (t *Tree) newVariable(pos Pos, ident string, line int) *VariableNode {
+	return &VariableNode{tr: t, NodeType: NodeVariable, Pos: pos, Line: line, Ident: strings.Split(ident, ".")}
+}
+
+func (v *VariableNode) lineNumber() int {
+	return v.Line
 }
 
 func (v *VariableNode) String() string {
@@ -956,11 +1001,16 @@ func (v *VariableNode) tree() *Tree {
 type DotNode struct {
 	NodeType
 	Pos
-	tr *Tree
+	tr   *Tree
+	Line int
 }
 
-func (t *Tree) newDot(pos Pos) *DotNode {
-	return &DotNode{tr: t, NodeType: NodeDot, Pos: pos}
+func (t *Tree) newDot(pos Pos, line int) *DotNode {
+	return &DotNode{tr: t, NodeType: NodeDot, Pos: pos, Line: line}
+}
+
+func (d *DotNode) lineNumber() int {
+	return d.Line
 }
 
 func (d *DotNode) Type() NodeType {
@@ -986,11 +1036,16 @@ func (d *DotNode) tree() *Tree {
 type NilNode struct {
 	NodeType
 	Pos
-	tr *Tree
+	tr   *Tree
+	Line int
 }
 
-func (t *Tree) newNil(pos Pos) *NilNode {
-	return &NilNode{tr: t, NodeType: NodeNil, Pos: pos}
+func (t *Tree) newNil(pos Pos, line int) *NilNode {
+	return &NilNode{tr: t, NodeType: NodeNil, Pos: pos, Line: line}
+}
+
+func (n *NilNode) lineNumber() int {
+	return n.Line
 }
 
 func (n *NilNode) Type() NodeType {
@@ -1019,11 +1074,16 @@ type FieldNode struct {
 	NodeType
 	Pos
 	tr    *Tree
+	Line  int
 	Ident []string // The identifiers in lexical order.
 }
 
-func (t *Tree) newField(pos Pos, ident string) *FieldNode {
-	return &FieldNode{tr: t, NodeType: NodeField, Pos: pos, Ident: strings.Split(ident[1:], ".")} // [1:] to drop leading period
+func (t *Tree) newField(pos Pos, ident string, line int) *FieldNode {
+	return &FieldNode{tr: t, NodeType: NodeField, Pos: pos, Line: line, Ident: strings.Split(ident[1:], ".")} // [1:] to drop leading period
+}
+
+func (f *FieldNode) lineNumber() int {
+	return f.Line
 }
 
 func (f *FieldNode) String() string {
@@ -1050,12 +1110,17 @@ type ChainNode struct {
 	NodeType
 	Pos
 	tr    *Tree
+	Line  int
 	Node  Node
 	Field []string // The identifiers in lexical order.
 }
 
-func (t *Tree) newChain(pos Pos, node Node) *ChainNode {
-	return &ChainNode{tr: t, NodeType: NodeChain, Pos: pos, Node: node}
+func (t *Tree) newChain(pos Pos, node Node, line int) *ChainNode {
+	return &ChainNode{tr: t, NodeType: NodeChain, Pos: pos, Line: line, Node: node}
+}
+
+func (c *ChainNode) lineNumber() int {
+	return c.Line
 }
 
 // Add adds the named field (which should start with a period) to the end of the chain.
@@ -1099,11 +1164,16 @@ type BoolNode struct {
 	NodeType
 	Pos
 	tr   *Tree
+	Line int
 	True bool // The value of the boolean constant.
 }
 
-func (t *Tree) newBool(pos Pos, true bool) *BoolNode {
-	return &BoolNode{tr: t, NodeType: NodeBool, Pos: pos, True: true}
+func (t *Tree) newBool(pos Pos, true bool, line int) *BoolNode {
+	return &BoolNode{tr: t, NodeType: NodeBool, Pos: pos, Line: line, True: true}
+}
+
+func (b *BoolNode) lineNumber() int {
+	return b.Line
 }
 
 func (b *BoolNode) String() string {
@@ -1128,6 +1198,7 @@ type NumberNode struct {
 	NodeType
 	Pos
 	tr         *Tree
+	Line       int
 	IsInt      bool       // Number has an integral value.
 	IsUint     bool       // Number has an unsigned integral value.
 	IsFloat    bool       // Number has a floating-point value.
@@ -1139,8 +1210,12 @@ type NumberNode struct {
 	Text       string     // The original textual representation from the input.
 }
 
-func (t *Tree) newNumber(pos Pos, text string, typ itemType) (*NumberNode, error) {
-	n := &NumberNode{tr: t, NodeType: NodeNumber, Pos: pos, Text: text}
+func (n *NumberNode) lineNumber() int {
+	return n.Line
+}
+
+func (t *Tree) newNumber(pos Pos, text string, typ itemType, line int) (*NumberNode, error) {
+	n := &NumberNode{tr: t, NodeType: NodeNumber, Pos: pos, Line: line, Text: text}
 	switch typ {
 	case itemCharConstant:
 		rune, _, tail, err := strconv.UnquoteChar(text[1:], text[0])
@@ -1259,12 +1334,17 @@ type StringNode struct {
 	NodeType
 	Pos
 	tr     *Tree
+	Line   int
 	Quoted string // The original text of the string, with quotes.
 	Text   string // The string, after quote processing.
 }
 
-func (t *Tree) newString(pos Pos, orig, text string) *StringNode {
-	return &StringNode{tr: t, NodeType: NodeString, Pos: pos, Quoted: orig, Text: text}
+func (t *Tree) newString(pos Pos, orig, text string, line int) *StringNode {
+	return &StringNode{tr: t, NodeType: NodeString, Pos: pos, Line: line, Quoted: orig, Text: text}
+}
+
+func (s *StringNode) lineNumber() int {
+	return s.Line
 }
 
 func (s *StringNode) String() string {
@@ -1284,11 +1364,16 @@ type EndNode struct {
 	NodeType
 	Pos
 	tr   *Tree
+	Line int
 	Trim trim
 }
 
-func (t *Tree) newEnd(pos Pos, trim trim) *EndNode {
-	return &EndNode{tr: t, NodeType: nodeEnd, Pos: pos, Trim: trim}
+func (t *Tree) newEnd(pos Pos, trim trim, line int) *EndNode {
+	return &EndNode{tr: t, NodeType: nodeEnd, Pos: pos, Line: line, Trim: trim}
+}
+
+func (e *EndNode) lineNumber() int {
+	return e.Line
 }
 
 func (e *EndNode) String() string {
@@ -1302,7 +1387,7 @@ func (e *EndNode) writeTo(sb *printer) {
 	sb.WriteString(e.Trim.leftDelim())
 	sb.WriteString("end")
 	sb.WriteString(e.Trim.rightDelim())
-	if e.Trim.right && sb.inHTMLTag {
+	if e.Trim.right && sb.html.inTag {
 		sb.rightTrimPending = true
 	}
 }
@@ -1327,6 +1412,10 @@ func (t *Tree) newElse(pos Pos, line int, keyword string, pipe *PipeNode, trim t
 	return &ElseNode{tr: t, NodeType: nodeElse, Pos: pos, Line: line, Keyword: keyword, Pipe: pipe, Trim: trim}
 }
 
+func (e *ElseNode) lineNumber() int {
+	return e.Line
+}
+
 func (e *ElseNode) Type() NodeType {
 	return nodeElse
 }
@@ -1338,7 +1427,7 @@ func (e *ElseNode) String() string {
 }
 
 func (e *ElseNode) writeTo(sb *printer) {
-	inAttrValue := sb.inHTMLTag && sb.inHTMLAttrValue
+	inAttrValue := sb.html.inTag && sb.html.inAttrValue
 	sb.writeControlIndent()
 	sb.WriteString(e.Trim.leftDelim())
 	sb.WriteString("else")
@@ -1351,7 +1440,7 @@ func (e *ElseNode) writeTo(sb *printer) {
 		}
 	}
 	sb.WriteString(e.Trim.rightDelim())
-	if sb.inHTMLTag && !sb.inHTMLAttrValue && !sb.inOneLiner {
+	if sb.html.inTag && !sb.html.inAttrValue && !sb.inOneLiner {
 		sb.htmlTagHadActions = true
 	}
 	savedHTMLDepth := sb.htmlDepth
@@ -1383,6 +1472,10 @@ type BranchNode struct {
 	Trim  trim
 }
 
+func (b *BranchNode) lineNumber() int {
+	return b.Line
+}
+
 func (b *BranchNode) String() string {
 	sb := newPrinter()
 	b.writeTo(sb)
@@ -1390,7 +1483,7 @@ func (b *BranchNode) String() string {
 }
 
 func (b *BranchNode) writeTo(sb *printer) {
-	inAttrValue := sb.inHTMLTag && sb.inHTMLAttrValue
+	inAttrValue := sb.html.inTag && sb.html.inAttrValue
 
 	// Detect one-liner branches (start and end on the same source line).
 	savedOneLiner := sb.inOneLiner
@@ -1399,7 +1492,7 @@ func (b *BranchNode) writeTo(sb *printer) {
 	}
 
 	if sb.inOneLiner {
-		if sb.inHTMLTag && !sb.inHTMLAttrValue {
+		if sb.html.inTag && !sb.html.inAttrValue {
 			// One-liner inside HTML tag: indent as attribute if at start of line.
 			s := sb.String()
 			if len(s) == 0 || s[len(s)-1] == '\n' {
@@ -1417,48 +1510,9 @@ func (b *BranchNode) writeTo(sb *printer) {
 		sb.writeControlIndent()
 	}
 
-	// Compute prefix for multi-line pipe formatting.
-	s := sb.String()
-	lastNL := strings.LastIndexByte(s, '\n')
-	afterNL := s
-	if lastNL >= 0 {
-		afterNL = s[lastNL+1:]
-	}
-	onOwnLine := strings.TrimLeft(afterNL, " \t") == ""
-	if onOwnLine {
-		sb.prefix = afterNL
-	} else {
-		sb.prefix = ""
-	}
+	sb.writeAction(b.Keyword, b.Pipe, b.Trim)
 
-	sb.WriteString(b.Trim.leftDelim())
-	sb.WriteString(b.Keyword)
-	if len(b.Pipe.Cmds) > 0 {
-		sb.WriteByte(' ')
-		before := strings.Count(sb.String(), "\n")
-		sb.depth = 1
-		b.Pipe.writeTo(sb)
-		sb.depth = 0
-		cur := sb.String()
-		after := strings.Count(cur, "\n")
-		if before != after {
-			if cur[len(cur)-1] != '`' {
-				sb.WriteString("\n")
-				if onOwnLine {
-					sb.WritePrefix()
-				}
-				sb.WriteString(b.Trim.rightDelimNoSpace())
-			} else {
-				sb.WriteString(b.Trim.rightDelim())
-			}
-		} else {
-			sb.WriteString(b.Trim.rightDelim())
-		}
-	} else {
-		sb.WriteString(b.Trim.rightDelim())
-	}
-
-	if sb.inHTMLTag && !sb.inHTMLAttrValue && !sb.inOneLiner {
+	if sb.html.inTag && !sb.html.inAttrValue && !sb.inOneLiner {
 		sb.htmlTagHadActions = true
 	}
 

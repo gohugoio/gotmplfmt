@@ -230,13 +230,13 @@ func (t *Tree) textOrAction() (n Node) {
 	token := t.nextNonSpace()
 	switch token.typ {
 	case itemText:
-		return t.newText(token.pos, token.val)
+		return t.newText(token.pos, token.val, token.line)
 	case itemLeftDelim:
 		t.actionLine = token.line
 		defer t.clearActionLine()
 		return t.action(token.trim)
 	case itemComment:
-		return t.newComment(token.pos, token.val, token.trim)
+		return t.newComment(token.pos, token.val, token.trim, token.line)
 	default:
 		t.unexpected(token, "input")
 	}
@@ -290,10 +290,10 @@ decls:
 		case next.typ == itemAssign, next.typ == itemDeclare:
 			pipe.IsAssign = next.typ == itemAssign
 			t.nextNonSpace()
-			pipe.Decl = append(pipe.Decl, t.newVariable(v.pos, v.val))
+			pipe.Decl = append(pipe.Decl, t.newVariable(v.pos, v.val, v.line))
 		case next.typ == itemChar && next.val == ",":
 			t.nextNonSpace()
-			pipe.Decl = append(pipe.Decl, t.newVariable(v.pos, v.val))
+			pipe.Decl = append(pipe.Decl, t.newVariable(v.pos, v.val, v.line))
 			if context == "range" && len(pipe.Decl) < 2 {
 				switch t.peekNonSpace().typ {
 				case itemVariable, itemRightDelim, itemRightParen:
@@ -382,7 +382,7 @@ Elses:
 func (t *Tree) endControl(trim trim) Node {
 	token := t.expect(itemRightDelim, "end")
 	trim.right = token.trim.right
-	return t.newEnd(token.pos, trim)
+	return t.newEnd(token.pos, trim, token.line)
 }
 
 // Else:
@@ -415,7 +415,8 @@ func (t *Tree) elseControl(trim trim) Node {
 // space-separated arguments up to a pipeline character or right delimiter.
 // we consume the pipe character but leave the right delim to terminate the action.
 func (t *Tree) command() *CommandNode {
-	cmd := t.newCommand(t.peekNonSpace().pos)
+	tok := t.peekNonSpace()
+	cmd := t.newCommand(tok.pos, tok.line)
 	for {
 		t.peekNonSpace() // skip leading spaces.
 		operand := t.operand()
@@ -453,7 +454,8 @@ func (t *Tree) operand() Node {
 		return nil
 	}
 	if t.peek().typ == itemField {
-		chain := t.newChain(t.peek().pos, node)
+		chainTok := t.peek()
+		chain := t.newChain(chainTok.pos, node, chainTok.line)
 		for t.peek().typ == itemField {
 			chain.Add(t.next().val)
 		}
@@ -464,9 +466,9 @@ func (t *Tree) operand() Node {
 		// More complex error cases will have to be handled at execution time.
 		switch node.Type() {
 		case NodeField:
-			node = t.newField(chain.Position(), chain.String())
+			node = t.newField(chain.Position(), chain.String(), chainTok.line)
 		case NodeVariable:
-			node = t.newVariable(chain.Position(), chain.String())
+			node = t.newVariable(chain.Position(), chain.String(), chainTok.line)
 		case NodeBool, NodeString, NodeNumber, NodeNil, NodeDot:
 			t.errorf("unexpected . after term %q", node.String())
 		default:
@@ -490,19 +492,19 @@ func (t *Tree) operand() Node {
 func (t *Tree) term() Node {
 	switch token := t.nextNonSpace(); token.typ {
 	case itemIdentifier:
-		return NewIdentifier(token.val).SetTree(t).SetPos(token.pos)
+		return NewIdentifier(token.val).SetTree(t).SetPos(token.pos).SetLine(token.line)
 	case itemDot:
-		return t.newDot(token.pos)
+		return t.newDot(token.pos, token.line)
 	case itemNil:
-		return t.newNil(token.pos)
+		return t.newNil(token.pos, token.line)
 	case itemVariable:
-		return t.useVar(token.pos, token.val)
+		return t.useVar(token.pos, token.val, token.line)
 	case itemField:
-		return t.newField(token.pos, token.val)
+		return t.newField(token.pos, token.val, token.line)
 	case itemBool:
-		return t.newBool(token.pos, token.val == "true")
+		return t.newBool(token.pos, token.val == "true", token.line)
 	case itemCharConstant, itemComplex, itemNumber:
-		number, err := t.newNumber(token.pos, token.val, token.typ)
+		number, err := t.newNumber(token.pos, token.val, token.typ, token.line)
 		if err != nil {
 			t.error(err)
 		}
@@ -515,7 +517,7 @@ func (t *Tree) term() Node {
 		if err != nil {
 			t.error(err)
 		}
-		return t.newString(token.pos, token.val, s)
+		return t.newString(token.pos, token.val, s, token.line)
 	}
 	t.backup()
 	return nil
@@ -523,6 +525,6 @@ func (t *Tree) term() Node {
 
 // useVar returns a node for a variable reference. It errors if the
 // variable is not defined.
-func (t *Tree) useVar(pos Pos, name string) Node {
-	return t.newVariable(pos, name)
+func (t *Tree) useVar(pos Pos, name string, line int) Node {
+	return t.newVariable(pos, name, line)
 }
