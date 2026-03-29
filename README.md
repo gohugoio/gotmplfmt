@@ -9,6 +9,7 @@ This is a Go HTML template formatter (we may add other formats in the future). T
 
 * We focus on getting the overall structure right, and not on formatting details (which is often highly subjective).
 * We use ... tabs and not spaces for indentation.
+* `define` blocks don't trigger indentation.
 * We don't auto-add trailing newlines to the document; see [this issue](https://github.com/prettier/prettier/issues/13036) for some context.
 * We don't read `.prettierignore`.
 * But we do support `{{/* gotmplfmt-ignore-all */}}`, `{{/* gotmplfmt-ignore-start */}}` and `{{/* gotmplfmt-ignore-end */}}`.

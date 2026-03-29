@@ -10,7 +10,7 @@
 {{ end }}
 
 <div
-	{{- with "foo" }}class="{{ . }}"{{- end }}
-	{{- with "bar" }}style="{{ . | safeCSS }}"{{- end -}}>
+	{{- with "foo" }} class="{{ . }}" {{- end }}
+	{{- with "bar" }} style="{{ . | safeCSS }}" {{- end -}}>
 	{{ .Content }}
 </div>

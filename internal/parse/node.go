@@ -184,6 +184,7 @@ type printer struct {
 	// Signals set by template actions for cross-node communication.
 	htmlTagHadActions bool   // a template action was written while an HTML tag was open
 	pendingCloseTag   string // tag name to auto-close after '>'
+	isLastInList      bool   // current node is the last in its parent ListNode
 
 	// Branch-scoped formatting flags (saved/restored per branch).
 	inOneLiner         bool // inside a one-liner branch (suppress newlines for else/end)
@@ -440,6 +441,7 @@ func (l *ListNode) writeTo(sb *printer) {
 		return
 	}
 	for i := 0; i < len(l.Nodes); i++ {
+		sb.isLastInList = i == len(l.Nodes)-1
 		n := l.Nodes[i]
 		if c, ok := n.(*CommentNode); ok && strings.Contains(c.Text, directiveIgnoreStart) {
 			found := false
@@ -559,6 +561,18 @@ func (t *TextNode) writeTo(sb *printer) {
 	for i, line := range lines {
 		if i == 0 {
 			sb.writeTextFirstLine(line)
+			// Handle pending auto-close tag. Only auto-close when this text
+			// is the last node in its list (meaning the tag closes right
+			// before {{ end }}, with no content after). If more nodes follow,
+			// the tag has actual content and a proper closing tag.
+			if sb.pendingCloseTag != "" {
+				if sb.isLastInList {
+					sb.writePendingCloseTag()
+				} else {
+					sb.htmlDepth++ // Count as normal opening tag.
+					sb.pendingCloseTag = ""
+				}
+			}
 		} else {
 			sb.writeTextLine(line, rawLineKind(i, rawRanges), i == len(lines)-1)
 		}
@@ -568,17 +582,14 @@ func (t *TextNode) writeTo(sb *printer) {
 // writeTextFirstLine writes the first line of a TextNode, which continues
 // on the same line as the previous node (no newline or indent is added).
 func (p *printer) writeTextFirstLine(line string) {
-	if p.oneLinerHTMLIndent {
-		// Indented one-liner in multi-line tag: trim spaces around content.
-		line = strings.Trim(line, " \t")
-	}
 	pre, post := p.computeHTMLDeltas(line)
 	p.htmlDepth += pre + post
 	if p.htmlDepth < 0 {
 		p.htmlDepth = 0
 	}
 	p.WriteString(line)
-	p.writePendingCloseTag()
+	// Note: pendingCloseTag is handled by TextNode.writeTo after this call,
+	// where it can check the full source for a proper closing tag.
 }
 
 // writeTextLine writes a subsequent (non-first) line of a TextNode.
@@ -636,9 +647,10 @@ func (p *printer) writeHTMLSegment(seg string, suppressDepth bool) {
 		p.htmlDepth = 0
 	}
 	extra := 0
-	if wasInTag && p.html.inTag {
-		// Continuation line inside a multiline HTML tag
-		// (e.g. attributes) — indent one level deeper.
+	if wasInTag && len(seg) > 0 && seg[0] != '>' && !strings.HasPrefix(seg, "/>") {
+		// Continuation line inside a multiline HTML tag with attribute
+		// content — indent one level deeper. Lines that are just the
+		// closing bracket (> or />) stay at the tag's indent level.
 		extra = 1
 	}
 	p.WriteString(indent(p.totalIndent() + extra))
@@ -875,11 +887,9 @@ func (c *CommandNode) writeTo(sb *printer) {
 	}
 	var prevLine int
 	for i, arg := range c.Args {
-		// TODO: quadratic!!!
 		line := lineno(arg)
 		if i > 0 {
 			if line > prevLine {
-				// TODO: preserve blank lines in input? That'd be: sb.WriteString(strings.Repeat("\n", line-prevLine))
 				sb.WriteString("\n")
 				sb.WritePrefix()
 			} else {
@@ -923,7 +933,6 @@ func NewIdentifier(ident string) *IdentifierNode {
 
 // SetPos sets the position. NewIdentifier is a public method so we can't modify its signature.
 // Chained for convenience.
-// TODO: fix one day?
 func (i *IdentifierNode) SetPos(pos Pos) *IdentifierNode {
 	i.Pos = pos
 	return i
@@ -931,7 +940,6 @@ func (i *IdentifierNode) SetPos(pos Pos) *IdentifierNode {
 
 // SetTree sets the parent tree for the node. NewIdentifier is a public method so we can't modify its signature.
 // Chained for convenience.
-// TODO: fix one day?
 func (i *IdentifierNode) SetTree(t *Tree) *IdentifierNode {
 	i.tr = t
 	return i
@@ -1015,8 +1023,7 @@ func (d *DotNode) lineNumber() int {
 
 func (d *DotNode) Type() NodeType {
 	// Override method on embedded NodeType for API compatibility.
-	// TODO: Not really a problem; could change API without effect but
-	// api tool complains.
+
 	return NodeDot
 }
 
@@ -1050,8 +1057,6 @@ func (n *NilNode) lineNumber() int {
 
 func (n *NilNode) Type() NodeType {
 	// Override method on embedded NodeType for API compatibility.
-	// TODO: Not really a problem; could change API without effect but
-	// api tool complains.
 	return NodeNil
 }
 
