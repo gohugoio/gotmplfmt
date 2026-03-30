@@ -1,0 +1,18 @@
+- id: gotmplfmt
+  name: gotmplfmt
+  description: Format Go templates
+  entry: gotmplfmt
+  args:
+    - "-w"
+  language: golang
+  types_or: [html, xml, svg, plain-text]
+- id: gotmplfmt-recursive
+  name: gotmplfmt-recursive
+  description: Format Go templates
+  entry: gotmplfmt
+  args:
+    - "-w"
+    - .
+  pass_filenames: false
+  language: golang
+  types_or: [text]

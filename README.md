@@ -27,6 +27,26 @@ go install github.com/gohugoio/gotmplfmt@latest
 
 For the VS Code extension, see [here](vscode/README.md)
 
+### pre-commit
+
+You can also use `gotmplfmt` as a [pre-commit](https://pre-commit.com/) / [prek](https://prek.j178.dev/) hook.
+
+```yaml
+- repo: https://github.com/gohugoio/gotmplfmt
+  rev: {vX.Y.Z, sha}
+  hooks:
+    - id: gotmplfmt
+```
+
+If you want to run recursively from the repository root instead of receiving file arguments from pre-commit, use:
+
+```yaml
+- repo: https://github.com/gohugoio/gotmplfmt
+  rev: {vX.Y.Z, sha}
+  hooks:
+    - id: gotmplfmt-recursive
+```
+
 ## License
 
 For the license for this code, please see the LICENSE file.
