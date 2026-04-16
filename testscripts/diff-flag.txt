@@ -1,0 +1,25 @@
+# Test -d flag displays diffs.
+
+gotmplfmt -d unformatted.html
+stdout 'diff'
+stdout '-  <span>hello</span>'
+
+# No diff output for already formatted files.
+gotmplfmt -d formatted.html
+! stdout .
+
+# Source file should be unchanged.
+cmp unformatted.html unformatted.orig.html
+
+-- unformatted.html --
+<div>
+  <span>hello</span>
+</div>
+-- unformatted.orig.html --
+<div>
+  <span>hello</span>
+</div>
+-- formatted.html --
+<div>
+	<span>hello</span>
+</div>

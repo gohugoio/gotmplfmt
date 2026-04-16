@@ -11,9 +11,14 @@ import (
 	"strings"
 
 	"github.com/gohugoio/gotmplfmt/internal/format"
+	"github.com/rogpeppe/go-internal/diff"
 )
 
-var writeFlag = flag.Bool("w", false, "write result to (source) file instead of stdout")
+var (
+	writeFlag = flag.Bool("w", false, "write result to (source) file instead of stdout")
+	listFlag  = flag.Bool("l", false, "list files whose formatting differs from gotmplfmt's")
+	diffFlag  = flag.Bool("d", false, "display diffs instead of rewriting files")
+)
 
 func main() {
 	log.SetFlags(0)
@@ -26,6 +31,9 @@ func main() {
 	if flag.NArg() == 0 {
 		if *writeFlag {
 			log.Fatal("error: cannot use -w with standard input")
+		}
+		if *listFlag {
+			log.Fatal("error: cannot use -l with standard input")
 		}
 		if err := processReader(os.Stdin, os.Stdout); err != nil {
 			log.Fatal(err)
@@ -70,6 +78,19 @@ func processFile(path string) error {
 	out, err := format.Format(string(src))
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
+	}
+	if *listFlag {
+		if out != string(src) {
+			fmt.Println(path)
+		}
+		return nil
+	}
+	if *diffFlag {
+		if out != string(src) {
+			d := diff.Diff(path+".orig", src, path, []byte(out))
+			os.Stdout.Write(d)
+		}
+		return nil
 	}
 	if *writeFlag {
 		if out == string(src) {

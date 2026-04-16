@@ -1,0 +1,25 @@
+# Test -l flag lists files whose formatting differs.
+
+gotmplfmt -l unformatted.html formatted.html
+stdout '^unformatted.html$'
+! stdout '^formatted.html$'
+
+# Source files should be unchanged.
+cmp unformatted.html unformatted.orig.html
+
+# Test that -l with stdin fails.
+! gotmplfmt -l
+stderr 'error: cannot use -l with standard input'
+
+-- unformatted.html --
+<div>
+  <span>hello</span>
+</div>
+-- unformatted.orig.html --
+<div>
+  <span>hello</span>
+</div>
+-- formatted.html --
+<div>
+	<span>hello</span>
+</div>

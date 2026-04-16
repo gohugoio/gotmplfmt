@@ -25,6 +25,40 @@ To use this as a CLI tool, you can run:
 go install github.com/gohugoio/gotmplfmt@latest
 ```
 
+```
+usage: gotmplfmt [flags] [path ...]
+
+  -d	display diffs instead of rewriting files
+  -l	list files whose formatting differs from gotmplfmt's
+  -w	write result to (source) file instead of stdout
+```
+
+Without flags, `gotmplfmt` prints the formatted output to stdout. When given a directory, it processes all template files (`.html`, `.htm`, `.xml`, `.svg`, `.rss`, `.atom`, `.txt`) recursively. It also reads from stdin when no paths are given.
+
+### CI
+
+To check that all files are formatted in CI, you can use the `-l` flag:
+
+```
+gotmplfmt -l . | grep . && exit 1
+```
+
+Or use `-d` to display the diffs:
+
+```
+gotmplfmt -d .
+```
+
+In a GitHub Actions, you may want to add something like these steps to your workflow:
+
+```yaml
+steps:
+  - name: Install gotmplfmt
+    run: go install github.com/gohugoio/gotmplfmt@latest
+  - name: Check go template formatting
+    run: "diff <(gotmplfmt -d layouts) <(printf '')"
+```
+
 For the VS Code extension, see [here](vscode/README.md)
 
 ## License
