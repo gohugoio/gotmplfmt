@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// To update the golden files, set writeOutput to true and run `go test -update`.
+// To update the golden files, run `go test -update`.
 var (
 	update = flag.Bool("update", false, "update the golden files")
 )
@@ -105,19 +105,24 @@ func tryParseGoTextTemplate(t *testing.T, text string) {
 		return "test"
 	}
 	funcMap := template.FuncMap{
+		"append":      fn,
 		"cond":        fn,
 		"css":         fn,
+		"default":     fn,
+		"diagrams":    fn,
 		"dict":        fn,
+		"errorf":      fn,
+		"fingerprint": fn,
+		"first":       fn,
 		"hugo":        fn,
 		"js":          fn,
+		"reflect":     fn,
 		"resources":   fn,
-		"site":        fn,
-		"fingerprint": fn,
 		"safeCSS":     fn,
-		"append":      fn,
-		"errorf":      fn,
-		"diagrams":    fn,
-		"default":     fn,
+		"safeHTML":    fn,
+		"site":        fn,
+		"transform":   fn,
+		"where":       fn,
 	}
 
 	_, err := template.New("").Funcs(funcMap).Parse(text)

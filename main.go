@@ -118,7 +118,7 @@ func processReader(r io.Reader, w io.Writer) error {
 func isTemplateFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
-	case ".html", ".htm", ".xml", ".svg", ".rss", ".atom", ".txt":
+	case ".html", ".htm", ".xml", ".svg", ".rss", ".atom", ".gotmpl", ".txt":
 		return true
 	}
 	return false

@@ -316,6 +316,13 @@ func (p *printer) computeHTMLDeltas(text string) (pre, post int) {
 		if tag.SelfClose || tag.IsVoid {
 			// no depth change
 		} else if tag.IsClose {
+			if voidElements[tag.Name] {
+				// XML contexts (RSS, Atom, SVG) can use HTML void names
+				// like <link> as normal elements. We skip depth change on
+				// the open (treated as void) so we must also skip on close
+				// to keep indentation balanced.
+				return
+			}
 			delta--
 			if delta < minDelta {
 				minDelta = delta
@@ -685,6 +692,9 @@ func (p *printer) splitHTMLLine(line string) []string {
 			return
 		}
 		if tag.IsClose {
+			if voidElements[tag.Name] {
+				return
+			}
 			depth--
 		} else {
 			depth++
