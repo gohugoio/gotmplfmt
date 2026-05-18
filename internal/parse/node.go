@@ -571,9 +571,18 @@ func (t *TextNode) writeTo(sb *printer) {
 			// Handle pending auto-close tag. Only auto-close when this text
 			// is the last node in its list (meaning the tag closes right
 			// before {{ end }}, with no content after). If more nodes follow,
-			// the tag has actual content and a proper closing tag.
+			// or the close tag already appears on a later line of this same
+			// TextNode, the tag has actual content and a proper closing tag.
 			if sb.pendingCloseTag != "" {
-				if sb.isLastInList {
+				closeTag := "</" + sb.pendingCloseTag + ">"
+				hasCloseAhead := false
+				for _, rest := range lines[1:] {
+					if strings.Contains(strings.ToLower(rest), closeTag) {
+						hasCloseAhead = true
+						break
+					}
+				}
+				if sb.isLastInList && !hasCloseAhead {
 					sb.writePendingCloseTag()
 				} else {
 					sb.htmlDepth++ // Count as normal opening tag.

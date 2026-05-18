@@ -1,0 +1,9 @@
+{{ $src := "" }} 
+{{ $class := "" }}
+{{ $iframeStyle := "" }}     
+        <iframe
+          src="{{- $src }}"
+          {{- if not $class }}
+            style="{{ $iframeStyle | safeCSS }}"
+          {{- end }}>
+        </iframe>
