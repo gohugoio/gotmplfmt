@@ -112,6 +112,7 @@ func tryParseGoTextTemplate(t *testing.T, text string) {
 		"diagrams":    fn,
 		"dict":        fn,
 		"errorf":      fn,
+		"foo":         fn,
 		"fingerprint": fn,
 		"first":       fn,
 		"hugo":        fn,

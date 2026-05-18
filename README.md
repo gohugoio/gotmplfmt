@@ -8,11 +8,12 @@ This is a Go HTML template formatter[^1]. It is based one the [text/template/par
 * We focus on getting the overall structure right, and not on formatting details (which is often highly subjective).
 * We use tabs and not spaces for indentation.
 * We have no options.
-* `define` blocks don't trigger indentation. See [this issue](https://github.com/gohugoio/gotmplfmt/issues/1) for some discussion.
-* We don't try to format `script` and `style` blocks.
-* We don't auto-add trailing newlines to the document; see [this issue](https://github.com/prettier/prettier/issues/13036) for some context.
 * We don't read `.prettierignore`.
 * But we do support `{{/* gotmplfmt-ignore-all */}}`, `{{/* gotmplfmt-ignore-start */}}` and `{{/* gotmplfmt-ignore-end */}}`.
+* `define` blocks don't trigger indentation. See [this issue](https://github.com/gohugoio/gotmplfmt/issues/1) for some discussion.
+* We don't try to format `script` and `style` blocks.
+*  `<script> `,  `<style> `,  `</script> `,  `</style> `,  `{{/* gotmplfmt-ignore-start */}} `, or  `{{/* gotmplfmt-ignore-end */}} ` have their leading whitespace preserved as written.
+* We don't auto-add trailing newlines to the document; see [this issue](https://github.com/prettier/prettier/issues/13036) for some context.
 * And we also care about idempotency, so if you run into a example where we format differently on subsequent runs, please report it as a bug.
 
 ## Install

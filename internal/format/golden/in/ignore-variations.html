@@ -1,0 +1,50 @@
+
+
+<html>
+	<script>
+	{{ if true }}var a = "b";{{ end }}
+	</script>
+
+<style>
+{{ if true }}body  { color: blue; }{{ end }}
+</style>
+
+
+{{ if true }}
+<script>
+var foo = "bar";
+</script>
+{{ end }}
+
+{{ if false }}
+	<script>
+  var foo = "bar";
+	</script>
+{{ end }}
+
+
+{{ if false }}
+   <style>
+   body { color: blue; }
+	 </style>
+{{ end }}
+
+
+<script>
+    (function() {
+        if (["localhost", "127.0.0.1"].indexOf(window.location.hostname) != -1) {
+            document.getElementById('disqus_thread').innerHTML = 'Disqus comments not available by default when the website is previewed locally.';
+            return;
+        }
+        var d = document, s = d.createElement('script'); s.async = true;
+        s.src = '//' + {{ .Site.Config.Services.Disqus.Shortname }} + '.disqus.com/embed.js';
+        s.setAttribute('data-timestamp', +new Date());
+        (d.head || d.body).appendChild(s);
+    })();
+</script>
+
+
+{{/* gotmplfmt-ignore-start */}}{{foo}}{{/* gotmplfmt-ignore-end */}}
+<style>{{foo}}</style>
+<script>{{foo}}</script>
+</html>

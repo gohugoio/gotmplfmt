@@ -185,6 +185,7 @@ type printer struct {
 	htmlTagHadActions bool   // a template action was written while an HTML tag was open
 	pendingCloseTag   string // tag name to auto-close after '>'
 	isLastInList      bool   // current node is the last in its parent ListNode
+	rawContentTag     string // inside <script>/<style> (body preserved verbatim across nodes)
 
 	// Branch-scoped formatting flags (saved/restored per branch).
 	inOneLiner         bool // inside a one-liner branch (suppress newlines for else/end)
@@ -316,6 +317,9 @@ func (p *printer) computeHTMLDeltas(text string) (pre, post int) {
 		if tag.SelfClose || tag.IsVoid {
 			// no depth change
 		} else if tag.IsClose {
+			if tag.Name == p.rawContentTag {
+				p.rawContentTag = ""
+			}
 			if voidElements[tag.Name] {
 				// XML contexts (RSS, Atom, SVG) can use HTML void names
 				// like <link> as normal elements. We skip depth change on
@@ -342,6 +346,9 @@ func (p *printer) computeHTMLDeltas(text string) (pre, post int) {
 			}
 		} else {
 			delta++
+			if p.rawContentTag == "" && rawContentElements[tag.Name] {
+				p.rawContentTag = tag.Name
+			}
 		}
 		p.htmlTagHadActions = false
 	})
@@ -443,6 +450,59 @@ func (l *ListNode) String() string {
 	return p.String()
 }
 
+// isAllWhitespace reports whether s contains only spaces and tabs.
+func isAllWhitespace(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] != ' ' && s[i] != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
+// rawNodeStart returns the byte position of the '{{' that opens n's action,
+// or -1 if it can't be found. n.Position() is interior to {{…}} for
+// Action/Branch/Comment nodes, so we walk back to the opening delimiter.
+func rawNodeStart(n Node, src string) int {
+	pos := int(n.Position())
+	if pos <= 0 || pos > len(src) {
+		return -1
+	}
+	return strings.LastIndex(src[:pos], "{{")
+}
+
+// findActionEnd returns the byte position just past the '}}' that closes the
+// action containing start, or -1 if not found. A '-}}' trim marker is before
+// '}}' so it is included in the returned slice.
+func findActionEnd(src string, start int) int {
+	if start < 0 || start >= len(src) {
+		return -1
+	}
+	idx := strings.Index(src[start:], "}}")
+	if idx < 0 {
+		return -1
+	}
+	return start + idx + 2
+}
+
+// rawNodeEnd returns the byte position just past the closing '}}' of n's
+// final action (the action itself for Action/Comment, the End for Branch),
+// or -1 if it can't be determined.
+func rawNodeEnd(n Node, src string) int {
+	switch nn := n.(type) {
+	case *ActionNode:
+		return findActionEnd(src, int(nn.Position()))
+	case *CommentNode:
+		return findActionEnd(src, int(nn.Position()))
+	case *BranchNode:
+		if nn.End == nil {
+			return -1
+		}
+		return findActionEnd(src, int(nn.End.Position()))
+	}
+	return -1
+}
+
 func (l *ListNode) writeTo(sb *printer) {
 	if l == nil {
 		return
@@ -455,14 +515,25 @@ func (l *ListNode) writeTo(sb *printer) {
 			for j := i + 1; j < len(l.Nodes); j++ {
 				if c2, ok := l.Nodes[j].(*CommentNode); ok && strings.Contains(c2.Text, directiveIgnoreEnd) {
 					src := l.tr.text
-					// Format the ignore-start comment with proper indentation.
+					cStart := rawNodeStart(c, src)
+					c2End := rawNodeEnd(c2, src)
+					if cStart >= 0 && c2End > cStart && c2End <= len(src) {
+						// Preserve user-set indentation for the ignore block:
+						// any whitespace before the start directive on its own
+						// line, plus the verbatim source through the end directive.
+						// This matches the behavior of <script>/<style> blocks.
+						lineStart := strings.LastIndexByte(src[:cStart], '\n') + 1
+						userIndent := src[lineStart:cStart]
+						if isAllWhitespace(userIndent) {
+							sb.WriteString(userIndent)
+						}
+						sb.WriteString(src[cStart:c2End])
+						i = j
+						found = true
+						break
+					}
+					// Defensive fallback to formatting via writeTo.
 					c.writeTo(sb)
-					// Copy raw source between the two directive comments.
-					afterStart := int(c.Position()) + len(c.Text)
-					ignoreStartEnd := afterStart + strings.Index(src[afterStart:], "}}") + 2
-					ignoreEndStart := strings.LastIndex(src[:int(c2.Position())], "{{")
-					sb.WriteString(strings.TrimRight(src[ignoreStartEnd:ignoreEndStart], " \t"))
-					// Format the ignore-end comment with proper indentation.
 					c2.writeTo(sb)
 					i = j
 					found = true
@@ -471,6 +542,21 @@ func (l *ListNode) writeTo(sb *printer) {
 			}
 			if found {
 				continue
+			}
+		}
+		// Inside a <script>/<style> block, non-text siblings (BranchNode,
+		// ActionNode, CommentNode) are spliced verbatim from raw source —
+		// equivalent to being wrapped in an implicit ignore-start/ignore-end.
+		// TextNodes go through their existing verbatim paths in writeTextLine.
+		if sb.rawContentTag != "" {
+			if _, isText := n.(*TextNode); !isText {
+				src := l.tr.text
+				start := rawNodeStart(n, src)
+				end := rawNodeEnd(n, src)
+				if start >= 0 && end > start && end <= len(src) {
+					sb.WriteString(src[start:end])
+					continue
+				}
 			}
 		}
 		n.writeTo(sb)
@@ -610,16 +696,45 @@ func (p *printer) writeTextFirstLine(line string) {
 
 // writeTextLine writes a subsequent (non-first) line of a TextNode.
 func (p *printer) writeTextLine(line string, rawKind rawLineType, isLast bool) {
-	// Raw content inside <script>/<style>: write verbatim.
+	// Raw content inside <script>/<style>: write the body verbatim,
+	// preserving the user-set indentation.
 	if rawKind == rawContent {
 		p.WriteByte('\n')
 		p.WriteString(line)
 		return
 	}
 
+	// Cross-TextNode raw content: <script>/<style> with embedded template
+	// actions splits the body across multiple TextNodes, so the per-TextNode
+	// findRawContentRanges can't see the matching close. Preserve body lines
+	// verbatim until the closing tag is reached.
+	if p.rawContentTag != "" && rawKind == rawNone {
+		closeTag := "</" + p.rawContentTag + ">"
+		if !strings.Contains(strings.ToLower(line), closeTag) {
+			p.WriteByte('\n')
+			p.WriteString(line)
+			return
+		}
+		// Closing tag line — fall through to preserve-indent path below.
+	}
+
 	trimmed := strings.TrimLeft(line, " \t")
 	if trimmed == "" {
 		p.WriteByte('\n')
+		return
+	}
+
+	// <script>/<style> tag lines (open or close) preserve the user-set
+	// indentation. Cases:
+	//   - rawTagLine: same-TextNode raw range tag line.
+	//   - p.rawContentTag set: closing tag for a cross-TextNode block.
+	//   - otherwise: an opening tag that begins a cross-TextNode block.
+	if rawKind == rawTagLine || isRawContentTagLine(trimmed, p.rawContentTag) {
+		// Update html scanner state (depth, rawContentTag) but discard the
+		// depth deltas — raw content lines are written verbatim.
+		p.computeHTMLDeltas(trimmed)
+		p.WriteByte('\n')
+		p.WriteString(line)
 		return
 	}
 
@@ -647,6 +762,32 @@ func (p *printer) writeTextLine(line string, rawKind rawLineType, isLast bool) {
 		p.WriteByte('\n')
 		p.writeHTMLSegment(seg, rawKind == rawTagLine)
 	}
+}
+
+// isRawContentTagLine reports whether trimmed (with leading whitespace already
+// removed) is a <script>/<style> opening tag line, or the matching closing tag
+// for an active cross-TextNode raw block.
+func isRawContentTagLine(trimmed string, currentRawTag string) bool {
+	lowered := strings.ToLower(trimmed)
+	if currentRawTag != "" {
+		prefix := "</" + currentRawTag
+		if strings.HasPrefix(lowered, prefix) {
+			after := lowered[len(prefix):]
+			if after == "" || after[0] == '>' || after[0] == ' ' || after[0] == '\t' {
+				return true
+			}
+		}
+	}
+	for tag := range rawContentElements {
+		prefix := "<" + tag
+		if strings.HasPrefix(lowered, prefix) && !strings.HasPrefix(lowered, "</") {
+			after := lowered[len(prefix):]
+			if after == "" || after[0] == '>' || after[0] == ' ' || after[0] == '\t' {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // writeHTMLSegment writes a single segment of an HTML line, computing
