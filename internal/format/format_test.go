@@ -120,6 +120,8 @@ func tryParseGoTextTemplate(t *testing.T, text string) {
 		"reflect":     fn,
 		"resources":   fn,
 		"safeCSS":     fn,
+		"markdownify": fn,
+		"plainify":    fn,
 		"safeHTML":    fn,
 		"site":        fn,
 		"transform":   fn,

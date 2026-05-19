@@ -559,6 +559,12 @@ func (l *ListNode) writeTo(sb *printer) {
 				}
 			}
 		}
+		// A pending right-trim only consumes immediately adjacent text;
+		// if the next sibling is a non-text node, the trim has nothing
+		// to do and must not leak into that node's body.
+		if _, isText := n.(*TextNode); !isText {
+			sb.rightTrimPending = false
+		}
 		n.writeTo(sb)
 	}
 }
