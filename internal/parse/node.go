@@ -188,9 +188,8 @@ type printer struct {
 	rawContentTag     string // inside <script>/<style> (body preserved verbatim across nodes)
 
 	// Branch-scoped formatting flags (saved/restored per branch).
-	inOneLiner         bool // inside a one-liner branch (suppress newlines for else/end)
-	oneLinerHTMLIndent bool // one-liner was indented as attribute in multi-line HTML tag
-	rightTrimPending   bool // right trim: strip leading whitespace from the next text node
+	inOneLiner       bool // inside a one-liner branch (suppress newlines for else/end)
+	rightTrimPending bool // right trim: strip leading whitespace from the next text node
 }
 
 func newPrinter() *printer {
@@ -261,12 +260,18 @@ func (p *printer) writeAction(keyword string, pipe *PipeNode, tr trim) {
 }
 
 func (p *printer) writeBranchIndent() {
-	if p.totalIndent() == 0 {
+	n := p.totalIndent()
+	if p.html.inTag && !p.html.inAttrValue {
+		// Inside a multi-line HTML tag: indent as an attribute
+		// continuation line, one level deeper than the tag.
+		n++
+	}
+	if n == 0 {
 		return
 	}
 	s := p.String()
 	if len(s) == 0 || s[len(s)-1] == '\n' {
-		p.WriteString(indent(p.totalIndent()))
+		p.WriteString(indent(n))
 	}
 }
 
@@ -1663,20 +1668,8 @@ func (b *BranchNode) writeTo(sb *printer) {
 	}
 
 	if sb.inOneLiner {
-		if sb.html.inTag && !sb.html.inAttrValue {
-			// One-liner inside HTML tag: indent as attribute if at start of line.
-			s := sb.String()
-			if len(s) == 0 || s[len(s)-1] == '\n' {
-				n := sb.totalIndent() + 1
-				if n > 0 {
-					sb.WriteString(indent(n))
-				}
-				sb.oneLinerHTMLIndent = true
-			}
-		} else {
-			// One-liner: add indent if at start of line, but don't force a newline.
-			sb.writeBranchIndent()
-		}
+		// One-liner: add indent if at start of line, but don't force a newline.
+		sb.writeBranchIndent()
 	} else {
 		sb.writeControlIndent()
 	}
@@ -1703,7 +1696,6 @@ func (b *BranchNode) writeTo(sb *printer) {
 	sb.htmlDepth = savedHTMLDepth
 	b.End.writeTo(sb)
 	sb.inOneLiner = savedOneLiner
-	sb.oneLinerHTMLIndent = false
 }
 
 func (b *BranchNode) tree() *Tree {
