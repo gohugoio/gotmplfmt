@@ -175,7 +175,8 @@ type tagEvent struct {
 type printer struct {
 	*strings.Builder
 	prefix      string
-	depth       int
+	depth       int // indentation depth for continuation lines in a multi-line pipe
+	lineDepth   int // indentation depth of the current output line in a multi-line pipe
 	branchDepth int
 	htmlDepth   int
 
@@ -208,8 +209,13 @@ func (p *printer) totalIndent() int {
 }
 
 func (p *printer) WritePrefix() {
+	p.writePrefixAt(p.depth)
+}
+
+func (p *printer) writePrefixAt(depth int) {
 	p.WriteString(p.prefix)
-	p.WriteString(indent(p.depth))
+	p.WriteString(indent(depth))
+	p.lineDepth = depth
 }
 
 // writeAction writes a template action: {{ keyword pipe }} or {{ pipe }}.
@@ -241,6 +247,7 @@ func (p *printer) writeAction(keyword string, pipe *PipeNode, tr trim) {
 		}
 		before := strings.Count(p.String(), "\n")
 		p.depth = 1
+		p.lineDepth = 0
 		pipe.writeTo(p)
 		p.depth = 0
 		cur := p.String()
@@ -1091,13 +1098,20 @@ func (c *CommandNode) writeTo(sb *printer) {
 		prevLine = line
 		if arg, ok := arg.(*PipeNode); ok {
 			sb.WriteByte('(')
+			// Nested pipe: continuation lines are indented one level
+			// deeper than the line the '(' is on, and a multi-line
+			// pipe gets its ')' back at that line's depth.
+			openLineDepth := sb.lineDepth
+			savedDepth := sb.depth
+			sb.depth = openLineDepth + 1
 			before := strings.Count(sb.String(), "\n")
 			arg.writeTo(sb)
 			after := strings.Count(sb.String(), "\n")
-			if ok && before != after {
+			if before != after {
 				sb.WriteString("\n")
-				sb.WritePrefix()
+				sb.writePrefixAt(openLineDepth)
 			}
+			sb.depth = savedDepth
 			sb.WriteByte(')')
 			continue
 		}
