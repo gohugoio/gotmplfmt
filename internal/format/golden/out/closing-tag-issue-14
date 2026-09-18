@@ -1,4 +1,4 @@
-			<podcast:trailer
+<podcast:trailer
 	{{ printf "pubdate=%q" (.Date.Format .Site.Params.date_format_RSS) | safeHTMLAttr }}
 	{{ if .Params.podcast.mlength -}}
 		url="{{ .Params.podcast.URLprefix | default .CurrentSection.Params.URLprefix }}{{ .Params.podcast.URLhost | default .CurrentSection.Params.URLhost }}{{ .Params.podcast.audio }}.mp3"

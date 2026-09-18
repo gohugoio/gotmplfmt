@@ -665,7 +665,7 @@ func (t *TextNode) writeTo(sb *printer) {
 
 	for i, line := range lines {
 		if i == 0 {
-			sb.writeTextFirstLine(line)
+			sb.writeTextFirstLine(line, rawLineKind(0, rawRanges))
 		} else {
 			sb.writeTextLine(line, rawLineKind(i, rawRanges), i == len(lines)-1)
 		}
@@ -701,8 +701,21 @@ func (p *printer) resolvePendingCloseTag(rest []string) {
 
 // writeTextFirstLine writes the first line of a TextNode, which continues
 // on the same line as the previous node (no newline or indent is added).
-func (p *printer) writeTextFirstLine(line string) {
+func (p *printer) writeTextFirstLine(line string, rawKind rawLineType) {
+	trimmed := strings.TrimLeft(line, " \t")
+	isRawTagLine := rawKind == rawTagLine || isRawContentTagLine(trimmed, p.rawContentTag)
+	if p.Len() == 0 && !isRawTagLine {
+		// Start of the document: there is no previous node to continue
+		// on the same line, so drop any leading indentation.
+		line = trimmed
+	}
 	pre, post := p.computeHTMLDeltas(line)
+	if isRawTagLine {
+		// <script>/<style> tag lines never change the depth; the
+		// scanner state is updated but the deltas are discarded,
+		// matching writeTextLine.
+		pre, post = 0, 0
+	}
 	p.htmlDepth += pre + post
 	if p.htmlDepth < 0 {
 		p.htmlDepth = 0
