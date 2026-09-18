@@ -1,0 +1,19 @@
+{{ $graph := "" }}
+{{- if true -}}
+	{{- $graph = $graph | append (dict
+		"@type" "SoftwareApplication"
+		"applicationCategory" "DeveloperApplication"
+		"operatingSystem" "Linux, macOS, Windows"
+		"url" .Permalink
+		"author" (dict
+			"@type" "Person"
+			"name" site.Params.author
+		)
+		"offers" (dict
+			"@type" "Offer"
+			"price" "0"
+			"priceCurrency" "USD"
+		)
+	)
+	-}}
+{{- end -}}
