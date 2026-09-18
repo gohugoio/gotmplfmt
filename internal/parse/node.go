@@ -361,7 +361,8 @@ func (p *printer) computeHTMLDeltas(text string) (pre, post int) {
 }
 
 func isTagNameChar(c byte) bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-'
+	// ':' allows XML namespaced names, e.g. <podcast:trailer> in RSS feeds.
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == ':'
 }
 
 var voidElements = map[string]bool{
@@ -665,30 +666,36 @@ func (t *TextNode) writeTo(sb *printer) {
 	for i, line := range lines {
 		if i == 0 {
 			sb.writeTextFirstLine(line)
-			// Handle pending auto-close tag. Only auto-close when this text
-			// is the last node in its list (meaning the tag closes right
-			// before {{ end }}, with no content after). If more nodes follow,
-			// or the close tag already appears on a later line of this same
-			// TextNode, the tag has actual content and a proper closing tag.
-			if sb.pendingCloseTag != "" {
-				closeTag := "</" + sb.pendingCloseTag + ">"
-				hasCloseAhead := false
-				for _, rest := range lines[1:] {
-					if strings.Contains(strings.ToLower(rest), closeTag) {
-						hasCloseAhead = true
-						break
-					}
-				}
-				if sb.isLastInList && !hasCloseAhead {
-					sb.writePendingCloseTag()
-				} else {
-					sb.htmlDepth++ // Count as normal opening tag.
-					sb.pendingCloseTag = ""
-				}
-			}
 		} else {
 			sb.writeTextLine(line, rawLineKind(i, rawRanges), i == len(lines)-1)
 		}
+		sb.resolvePendingCloseTag(lines[i+1:])
+	}
+}
+
+// resolvePendingCloseTag handles an opening tag that computeHTMLDeltas marked
+// as an auto-close candidate. Only auto-close when this text is the last node
+// in its list (meaning the tag closes right before {{ end }}, with no content
+// after) and the close tag does not appear on a later line (rest) of this
+// same TextNode. Otherwise the tag has actual content and a proper closing
+// tag, so count it as a normal opening tag.
+func (p *printer) resolvePendingCloseTag(rest []string) {
+	if p.pendingCloseTag == "" {
+		return
+	}
+	closeTag := "</" + p.pendingCloseTag + ">"
+	hasCloseAhead := false
+	for _, line := range rest {
+		if strings.Contains(strings.ToLower(line), closeTag) {
+			hasCloseAhead = true
+			break
+		}
+	}
+	if p.isLastInList && !hasCloseAhead {
+		p.writePendingCloseTag()
+	} else {
+		p.htmlDepth++
+		p.pendingCloseTag = ""
 	}
 }
 
@@ -823,7 +830,8 @@ func (p *printer) writeHTMLSegment(seg string, suppressDepth bool) {
 	}
 	p.WriteString(indent(p.totalIndent() + extra))
 	p.WriteString(seg)
-	p.writePendingCloseTag()
+	// Note: pendingCloseTag is resolved by TextNode.writeTo after the
+	// whole line is written, where it can look ahead for a closing tag.
 	p.htmlDepth += post
 	if p.htmlDepth < 0 {
 		p.htmlDepth = 0
