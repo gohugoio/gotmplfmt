@@ -15,9 +15,11 @@ import (
 	"github.com/rogpeppe/go-internal/diff"
 )
 
+const develTag = "(devel)"
+
 var (
 	commit = "none"
-	tag    = "(devel)"
+	tag    = develTag
 	date   = "unknown"
 )
 
@@ -144,6 +146,8 @@ func initVersionInfo() {
 		return
 	}
 
+	tag = resolveTag(tag, bi)
+
 	for _, s := range bi.Settings {
 		switch s.Key {
 		case "vcs":
@@ -154,4 +158,17 @@ func initVersionInfo() {
 		case "vcs.modified":
 		}
 	}
+}
+
+// resolveTag returns the tag set via ldflags if any, otherwise the module
+// version recorded in the build info. The latter is what is available when
+// installed with e.g. go install github.com/gohugoio/gotmplfmt@v0.4.1.
+func resolveTag(tag string, bi *debug.BuildInfo) string {
+	if tag != "" && tag != develTag {
+		return tag
+	}
+	if bi != nil && bi.Main.Version != "" && bi.Main.Version != develTag {
+		return bi.Main.Version
+	}
+	return tag
 }
