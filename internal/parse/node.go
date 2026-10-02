@@ -787,7 +787,11 @@ func (p *printer) writeTextLine(line string, rawKind rawLineType, isLast bool) {
 			return
 		}
 		tail := trimmed[len(t):]
-		if strings.ContainsRune(tail, '\t') {
+		if len(tail) > 0 && strings.HasSuffix(t, "{") {
+			// Keep a separator so the "{" doesn't merge with the
+			// following "{{" delimiter (e.g. "{\t{{ . }}" -> "{{{ . }}").
+			trimmed = t + " "
+		} else if strings.ContainsRune(tail, '\t') {
 			trimmed = t
 		} else if len(tail) > 0 {
 			trimmed = t + " "
